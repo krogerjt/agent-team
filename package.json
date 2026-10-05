@@ -5,6 +5,7 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "code": "tsx src/coding/cli.ts",
+    "team": "tsx src/team/cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/**/*.test.ts"
   },

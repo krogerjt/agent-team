@@ -1,6 +1,6 @@
 # Agent Team
 
-A small TypeScript pipeline with three personas: Researcher investigates a goal, Reviewer critiques the findings, and Lead writes the final answer. Each role chooses its own model provider through local configuration.
+A portable TypeScript agent team. The original text pipeline uses Researcher, Reviewer, and Lead. The coding workflow can also run a six-person team, with each persona choosing its own model provider through local configuration.
 
 ## Quick start
 
@@ -47,3 +47,39 @@ The coding command requires a clean Git repository with a commit. It creates a s
 Automatic checks include Node `test` and `typecheck` scripts, one root .NET solution or project, and Python pytest or unittest discovery. For Node repositories with a lockfile, the runner uses `npm ci --ignore-scripts` in the worktree before checks. A missing tool or undetected check is reported, not counted as a pass. Model tool use is limited to repository file listing, reading, literal search, and exact text patches; it cannot ask the runner to execute arbitrary commands.
 
 The runner removes credential-like environment variables, including API keys, before starting repository checks. Checks are still code supplied by the selected repository, so choose repositories you trust.
+
+## Six-person team
+
+| Persona | Responsibility |
+| --- | --- |
+| Marlow | Inspect the repo, plan up to four tasks, and summarize the result |
+| Juniper | Research each task in the codebase |
+| Kit | Implement and test general code tasks |
+| Wren | Implement interface tasks |
+| Rowan | Refactor assigned code and review other workers |
+| Tove | Check task acceptance and prepare shared project memory |
+
+Start a goal with:
+
+```powershell
+npm run team -- run --repo C:\path\to\your\repo --goal "Add a small feature"
+```
+
+The command prints a run directory. Use it to inspect the task wall, reviewer notes, checks, and final diff:
+
+```powershell
+npm run team -- status --run "<run-directory>"
+npm run team -- review --run "<run-directory>"
+```
+
+Marlow creates a task plan with dependencies. Tasks execute in dependency order. Each coding worker gets a separate worktree and local branch. Approved task branches advance a staging branch, while your original checkout stays at its starting commit. The run state, plan, and event log are saved under `~/.agent-team/repos/<repo>/runs/`. Tove's memory note is added to the repo's shared library only after you merge.
+
+After reviewing the diff, explicitly merge the staging branch into your original checkout:
+
+```powershell
+npm run team -- merge --run "<run-directory>"
+```
+
+Merge requires the original checkout to be clean and still at the starting commit. It is a local fast-forward; no push occurs. A task with unresolved check, review, or QA issues remains blocked in its worktree and cannot be merged through this command. Worktrees and logs remain available for inspection.
+
+`MARLOW_*`, `JUNIPER_*`, `KIT_*`, `WREN_*`, `ROWAN_*`, and `TOVE_*` in `.env` can select providers and models individually. If omitted, they inherit the existing Lead, Researcher, and Reviewer settings shown in `.env.example`. The team backend is a sequential CLI workflow; an interactive console, live monitors, and visual review screen are future interface work.

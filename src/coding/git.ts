@@ -40,6 +40,15 @@ export async function createWorktree(repo: string): Promise<Worktree> {
   return { path: worktree, branch };
 }
 
+export async function createBranchWorktree(repo: string, branch: string, baseRef: string): Promise<Worktree> {
+  if (!/^codex\/[a-z0-9-]+$/.test(branch)) throw new Error("Invalid team branch name.");
+  const container = path.join(path.dirname(repo), ".agent-team-worktrees");
+  await mkdir(container, { recursive: true });
+  const worktree = path.join(container, `${path.basename(repo)}-${branch.slice(6)}`);
+  await git(repo, ["worktree", "add", "-b", branch, worktree, baseRef]);
+  return { path: worktree, branch };
+}
+
 export async function diff(repo: string): Promise<string> {
   const tracked = await git(repo, ["diff", "--no-ext-diff", "--", "."]);
   const untracked = (await git(repo, ["ls-files", "--others", "--exclude-standard", "-z"])).split("\0").filter(Boolean);
