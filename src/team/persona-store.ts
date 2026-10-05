@@ -8,6 +8,24 @@ import { searchTimeline } from "./timeline.js";
 
 export interface PersonaActivity { at: string; runId: string; event: string; detail: string }
 export interface PersonaChat { at: string; role: "user" | "assistant"; text: string; runId?: string }
+export interface PerformanceCaseResult {
+  scenario: string;
+  response: string;
+  score: number;
+  feedback: string;
+}
+export interface PerformanceEvaluation {
+  id: string;
+  at: string;
+  evaluator: PersonaId;
+  score: number;
+  summary: string;
+  strengths: string[];
+  improvements: string[];
+  reflection: string;
+  guidance: string;
+  cases: PerformanceCaseResult[];
+}
 export interface PersonaProfile {
   id: PersonaId;
   traits: string;
@@ -16,6 +34,8 @@ export interface PersonaProfile {
   chat: PersonaChat[];
   provider?: ProviderName;
   model?: string;
+  performanceGuidance: string;
+  evaluations: PerformanceEvaluation[];
 }
 
 const ids = Object.keys(roster) as PersonaId[];
@@ -36,13 +56,13 @@ function file(repo: string, id: PersonaId): string {
 }
 
 function initial(id: PersonaId): PersonaProfile {
-  return { id, traits: defaultTraits[id], memory: "", activity: [], chat: [] };
+  return { id, traits: defaultTraits[id], memory: "", activity: [], chat: [], performanceGuidance: "", evaluations: [] };
 }
 
 export async function readPersona(repo: string, id: PersonaId): Promise<PersonaProfile> {
   try {
     const value = JSON.parse(await readFile(file(repo, id), "utf8")) as Partial<PersonaProfile>;
-    return { ...initial(id), ...value, id, activity: value.activity ?? [], chat: value.chat ?? [] };
+    return { ...initial(id), ...value, id, activity: value.activity ?? [], chat: value.chat ?? [], performanceGuidance: value.performanceGuidance ?? "", evaluations: value.evaluations ?? [] };
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return initial(id);
     throw error;
@@ -102,10 +122,18 @@ export async function appendChat(repo: string, id: PersonaId, item: PersonaChat)
   });
 }
 
+export async function appendEvaluation(repo: string, id: PersonaId, evaluation: PerformanceEvaluation): Promise<PersonaProfile> {
+  return mutatePersona(repo, id, (profile) => {
+    profile.evaluations.unshift(evaluation);
+    profile.evaluations = profile.evaluations.slice(0, 20);
+    profile.performanceGuidance = evaluation.guidance.slice(0, 2_000);
+  });
+}
+
 export async function personaContext(repo: string, id: PersonaId): Promise<string> {
   const profile = await readPersona(repo, id);
   const recent = (await searchTimeline(repo, id, { limit: 5 })).entries.map((item) => `${item.at}: ${item.summary}`).join("\n");
-  return `Personal traits: ${profile.traits}\nPinned memory: ${profile.memory || "(empty)"}\nRecent timeline:\n${recent || "(none yet)"}\nFor questions about previous work, features, files, or dates, use search_memory and get_memory_entry before answering. Distinguish recorded actions from verified results.`;
+  return `Personal traits: ${profile.traits}\nPinned memory: ${profile.memory || "(empty)"}\nPerformance guidance from the latest review: ${profile.performanceGuidance || "(none yet)"}\nRecent timeline:\n${recent || "(none yet)"}\nFor questions about previous work, features, files, or dates, use search_memory and get_memory_entry before answering. Distinguish recorded actions from verified results.`;
 }
 
 export async function configuredProvider(repo: string, id: PersonaId): Promise<ModelProvider> {

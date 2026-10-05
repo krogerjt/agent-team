@@ -201,7 +201,7 @@ async function advanceRun(state: TeamRunState, providers: TeamProviders, library
   return state;
 }
 
-async function isWebProject(repo: string): Promise<boolean> {
+export async function isWebProject(repo: string): Promise<boolean> {
   try { if (await readCookbook(repo)) return true; } catch { return true; }
   try {
     const pkg = JSON.parse(await readFile(path.join(repo, "package.json"), "utf8")) as { scripts?: Record<string, string> };
@@ -363,7 +363,7 @@ async function finishRun(state: TeamRunState, providers: TeamProviders, library:
     return state;
   }
   {
-    const taskSummary = state.tasks.map((item) => `${item.id}: ${item.status}; checks: ${item.checks?.map((check) => `${check.name} ${check.status}`).join(", ")}; review: ${item.review ?? "none"}; QA: ${item.qa ?? "none"}`).join("\n");
+    const taskSummary = state.tasks.map((item) => `${item.id}: ${item.status}; checks: ${item.checks?.map((check) => `${check.name} ${check.status}`).join(", ")}; review: ${item.review ?? "none"}; QA: ${item.qa ?? "none"}`).join("\n") + (state.integrationChecks ? `\nThis run was updated against newer repository code. Task notes above describe the original build. Checks on the combined code: ${JSON.stringify(state.integrationChecks)}` : "");
     const finalDiff = await git(state.staging!.path, ["diff", "--no-ext-diff", `${state.baseCommit}..HEAD`, "--", "."]);
     state.summary = (await providers.marlow.generate({
       systemPrompt: `${roster.marlow.systemPrompt}\n${await personaContext(state.repo, "marlow")}`,
@@ -374,6 +374,7 @@ async function finishRun(state: TeamRunState, providers: TeamProviders, library:
       userPrompt: `Write concise Markdown memory for future runs. Use the QA findings and final diff below as evidence. Record verified repository conventions, decisions, and remaining uncertainty only. Goal: ${state.goal}\nPlan: ${JSON.stringify(state.plan)}\nTasks:\n${taskSummary}\nFinal diff:\n${finalDiff.slice(0, 24_000)}\nHuman decisions: ${JSON.stringify(state.decisions ?? [])}\nExisting library:\n${library}`,
     })).text;
     state.status = "awaiting-review";
+    state.needsPreviewReview = false;
     await logEvent(state, "host", "awaiting-review", state.staging!.path);
   }
   await saveState(state);
@@ -507,6 +508,8 @@ export async function reviewTeamRun(runDir: string): Promise<{ state: TeamRunSta
 export async function mergeTeamRun(runDir: string): Promise<TeamRunState> {
   const state = await loadState(runDir);
   if (state.status !== "awaiting-review" || !state.staging) throw new Error("Run is not ready for merge.");
+  if (state.integration) throw new Error("Finish updating this run before merging.");
+  if (state.needsPreviewReview) throw new Error("Review the updated preview before merging.");
   const repo = await resolveCleanRepo(state.repo);
   if (await git(repo, ["rev-parse", "HEAD"]) !== state.baseCommit) throw new Error("Original checkout has advanced since this run; review and reconcile it first.");
   if (await git(state.staging.path, ["status", "--porcelain", "--untracked-files=all"])) throw new Error("Staging worktree has uncommitted changes.");

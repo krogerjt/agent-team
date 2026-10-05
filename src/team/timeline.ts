@@ -18,7 +18,7 @@ export interface TimelineEntry {
   files: string[];
   runId?: string;
   taskId?: string;
-  source: "run" | "chat" | "legacy";
+  source: "run" | "chat" | "review" | "legacy";
 }
 
 export interface TimelineSearch {

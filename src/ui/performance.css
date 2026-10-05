@@ -1,0 +1,18 @@
+.performance-intro { text-align: center; padding: 8px 0 20px; border-bottom: 1px solid #38435c; }
+.performance-intro > span { font-size: 31px; color: #c4a8ef; }
+.performance-intro h3 { font-family: 'Trebuchet MS', system-ui, sans-serif; font-size: 19px; margin: 8px 0 6px; }
+.performance-intro p { font-size: 11px; color: #9ba5c0; margin: 0 0 15px; }
+.performance-intro .primary-button { width: 100%; }
+.coaching-note { margin: 17px 0; padding: 13px; background: #2b3451; border: 1px solid #566280; border-radius: 8px; }
+.coaching-note small { font-size: 9px; letter-spacing: .13em; color: #baa8e7; font-weight: 800; }
+.coaching-note p { font-size: 11px; white-space: pre-wrap; margin: 7px 0 0; color: #d2d7e5; }
+.evaluation-card { display: grid; grid-template-columns: 62px 1fr; gap: 12px; padding: 14px 0; border-top: 1px solid #38415c; }
+.evaluation-score { height: 59px; display: grid; place-content: center; text-align: center; background: #33435a; border: 1px solid #54736f; border-radius: 8px; }
+.evaluation-score strong { font-size: 20px; color: #a9dfbd; line-height: 1; }
+.evaluation-score span { font-size: 8px; color: #8493ab; margin-top: 3px; }
+.evaluation-copy { min-width: 0; }
+.evaluation-copy time { font-size: 9px; color: #7f8ba7; }
+.evaluation-copy > p, .evaluation-copy details { font-size: 11px; color: #b4bed2; margin: 6px 0; }
+.evaluation-copy summary { cursor: pointer; color: #c6afea; }
+.evaluation-copy ul { padding-left: 17px; }
+.evaluation-copy li { margin-bottom: 4px; }

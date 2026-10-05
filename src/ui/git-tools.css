@@ -1,0 +1,32 @@
+.git-toolbar { display: flex; justify-content: flex-end; padding: 12px 32px 0; }
+.git-recovery { border: 1px solid #706299; background: #292e49; border-radius: 10px; padding: 18px; margin-bottom: 20px; min-width: 0; }
+.git-status-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.git-status-head h3 { margin: 6px 0; }
+.git-location { color: #bfc5da; font-size: 12px; overflow-wrap: anywhere; }
+.git-blockers { color: #f5d6ae; padding-left: 22px; line-height: 1.6; }
+.git-clean { color: #7fe0bc; }
+.git-local-changes, .git-next-step { border-top: 1px solid #464c69; padding-top: 14px; margin-top: 16px; }
+.git-local-changes summary, .git-conflict summary, .git-check summary { cursor: pointer; font-weight: 600; overflow-wrap: anywhere; }
+.git-files { display: grid; gap: 8px; max-height: 240px; overflow: auto; background: #191f35; padding: 12px; border-radius: 7px; margin: 12px 0; }
+.git-files label { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.git-files input { flex: 0 0 auto; width: 16px; height: 16px; accent-color: #bba2ef; }
+.git-files code, .git-next-step code { overflow-wrap: anywhere; white-space: normal; }
+.git-message { display: grid; gap: 8px; margin: 14px 0; font-weight: 600; }
+.git-message input { width: 100%; min-width: 0; border: 1px solid #566080; border-radius: 7px; padding: 12px; background: #171e34; color: #eef0fa; }
+.git-conflict { background: #1b2239; padding: 14px; border-radius: 8px; margin-bottom: 12px; }
+.git-versions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.git-versions > div { min-width: 0; }
+.git-versions pre, .git-check pre { max-height: 280px; overflow: auto; background: #131a2b; border: 1px solid #404967; border-radius: 6px; padding: 12px; font-size: 11px; }
+.git-check { padding: 10px 0; }
+.git-check.failed summary { color: #f8abb1; }
+.git-check.passed summary { color: #7fe0bc; }
+.git-check.missing summary { color: #f5d6ae; }
+.git-recovery .diff, #git-modal .diff { max-height: 280px; }
+.git-recovery p, #git-modal p { overflow-wrap: anywhere; }
+.primary-button:disabled, .secondary-button:disabled { cursor: default; }
+@media (max-width: 650px) {
+  .git-toolbar { padding: 10px 18px 0; }
+  .git-status-head { align-items: flex-start; flex-direction: column; }
+  .git-versions { grid-template-columns: minmax(0, 1fr); }
+  .git-recovery { padding: 12px; }
+}

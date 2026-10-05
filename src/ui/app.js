@@ -1,5 +1,6 @@
-const state = { repo: "", head: "", profiles: [], runs: [], library: "", jobs: {}, selectedRun: null, selectedAgent: "marlow", view: "workshop", panelTab: "chat", review: null, events: [], apiToken: "" };
+const state = { repo: "", repositories: [], head: "", profiles: [], runs: [], library: "", jobs: {}, selectedRun: null, selectedAgent: "marlow", view: "workshop", panelTab: "chat", review: null, events: [], apiToken: "" };
 const dismissedPrompts = new Set();
+let workspaceVersion = 0;
 const colors = {
   marlow: ["#8b9ce8", "#d6d8c8", "#24356d", "#e6b899"],
   juniper: ["#a775d6", "#26212e", "#664091", "#a96543"],
@@ -19,22 +20,36 @@ const fmt = (date) => { try { return new Date(date).toLocaleString(undefined, { 
 
 function avatar(id, size = "") {
   const [accent, hair, coat, skin] = colors[id];
-  const headwear = id === "marlow" ? `<rect x="13" y="7" width="28" height="5" fill="${hair}"/><rect x="10" y="12" width="34" height="3" fill="${hair}"/>` :
-    id === "kit" ? `<rect x="11" y="9" width="32" height="7" fill="${accent}"/><rect x="10" y="15" width="33" height="3" fill="#d7e6f6"/>` :
-    id === "wren" ? `<rect x="11" y="8" width="32" height="8" fill="${accent}"/><rect x="9" y="16" width="35" height="4" fill="${accent}"/>` :
-    id === "juniper" ? `<rect x="11" y="7" width="32" height="8" fill="${hair}"/><rect x="12" y="15" width="30" height="4" fill="${accent}"/>` :
-    id === "tove" ? `<rect x="11" y="7" width="32" height="10" fill="${hair}"/><rect x="8" y="15" width="9" height="28" fill="${hair}"/><rect x="37" y="15" width="9" height="28" fill="${hair}"/>` :
-    id === "piper" ? `<rect x="10" y="7" width="34" height="12" fill="${hair}"/><rect x="8" y="15" width="8" height="23" fill="${hair}"/><rect x="38" y="15" width="8" height="23" fill="${hair}"/><rect x="18" y="9" width="18" height="4" fill="#db7a4b"/>` :
-    `<rect x="11" y="8" width="32" height="10" fill="${hair}"/><rect x="11" y="18" width="5" height="17" fill="${hair}"/><rect x="38" y="18" width="5" height="17" fill="${hair}"/>`;
-  const beard = id === "marlow" || id === "rowan" ? `<rect x="18" y="32" width="19" height="7" fill="${hair}"/><rect x="22" y="37" width="11" height="3" fill="${hair}"/>` : "";
-  const glasses = id === "marlow" ? `<rect x="15" y="25" width="11" height="7" fill="none" stroke="#38364e" stroke-width="2"/><rect x="29" y="25" width="11" height="7" fill="none" stroke="#38364e" stroke-width="2"/><rect x="26" y="27" width="3" height="2" fill="#38364e"/>` : "";
-  return `<svg class="avatar ${size}" viewBox="0 0 54 82" role="img" aria-label="${id} pixel character" shape-rendering="crispEdges"><rect x="8" y="46" width="9" height="25" fill="${coat}"/><rect x="38" y="46" width="9" height="25" fill="${coat}"/><rect x="10" y="66" width="7" height="7" fill="${skin}"/><rect x="38" y="66" width="7" height="7" fill="${skin}"/><rect x="17" y="43" width="21" height="29" fill="${coat}"/><rect x="16" y="43" width="22" height="5" fill="${accent}"/><rect x="19" y="72" width="7" height="9" fill="#3e3545"/><rect x="30" y="72" width="7" height="9" fill="#3e3545"/><rect x="14" y="16" width="28" height="25" fill="${skin}"/><rect x="12" y="22" width="4" height="14" fill="${skin}"/><rect x="40" y="22" width="4" height="14" fill="${skin}"/>${headwear}<rect x="20" y="27" width="3" height="3" fill="#252b3c"/><rect x="32" y="27" width="3" height="3" fill="#252b3c"/>${beard}${glasses}<rect x="25" y="34" width="5" height="2" fill="#b87973"/><rect x="26" y="48" width="3" height="13" fill="#d8d3c8"/></svg>`;
+  const hairBack = id === "tove" ? `<rect x="10" y="13" width="34" height="30" fill="${hair}"/><rect x="7" y="20" width="7" height="27" fill="${hair}"/><rect x="40" y="20" width="7" height="27" fill="${hair}"/>` :
+    id === "wren" ? `<rect x="10" y="12" width="34" height="30" fill="${hair}"/><rect x="8" y="20" width="7" height="22" fill="${hair}"/><rect x="39" y="20" width="7" height="22" fill="${hair}"/>` :
+    `<rect x="11" y="12" width="32" height="29" fill="${hair}"/><rect x="9" y="20" width="6" height="19" fill="${hair}"/><rect x="39" y="20" width="6" height="19" fill="${hair}"/>`;
+  const hairFront = id === "marlow" ? `<rect x="13" y="9" width="28" height="6" fill="${hair}"/><rect x="10" y="13" width="8" height="5" fill="${hair}"/><rect x="36" y="13" width="8" height="5" fill="${hair}"/>` :
+    id === "juniper" ? `<rect x="11" y="8" width="32" height="7" fill="${hair}"/><rect x="9" y="13" width="8" height="7" fill="${hair}"/><rect x="38" y="13" width="7" height="9" fill="${hair}"/><rect x="12" y="8" width="30" height="3" fill="${accent}"/>` :
+    id === "kit" ? `<rect x="10" y="8" width="34" height="8" fill="${accent}"/><rect x="8" y="14" width="37" height="4" fill="#d7e6f6"/><rect x="12" y="18" width="7" height="4" fill="${hair}"/><rect x="35" y="18" width="7" height="4" fill="${hair}"/>` :
+    id === "wren" ? `<rect x="10" y="9" width="34" height="8" fill="${hair}"/><rect x="8" y="15" width="8" height="10" fill="${hair}"/><rect x="39" y="15" width="7" height="11" fill="${hair}"/><rect x="11" y="8" width="32" height="3" fill="${accent}"/>` :
+    id === "rowan" ? `<rect x="10" y="9" width="34" height="10" fill="${hair}"/><rect x="8" y="15" width="8" height="9" fill="${hair}"/><rect x="39" y="15" width="7" height="12" fill="${hair}"/><rect x="14" y="8" width="7" height="4" fill="#8a5b42"/><rect x="31" y="8" width="8" height="4" fill="#8a5b42"/>` :
+    id === "piper" ? `<rect x="6" y="11" width="42" height="5" fill="#6b4a2e"/><rect x="13" y="6" width="28" height="9" fill="#805936"/><rect x="16" y="7" width="22" height="4" fill="#946943"/><rect x="9" y="16" width="7" height="11" fill="${hair}"/><rect x="38" y="16" width="7" height="10" fill="${hair}"/>` :
+    `<rect x="11" y="9" width="32" height="8" fill="${hair}"/>`;
+  const beard = id === "marlow" ? `<rect x="17" y="32" width="21" height="7" fill="${hair}"/><rect x="21" y="38" width="13" height="3" fill="${hair}"/>` : id === "rowan" ? `<rect x="17" y="31" width="21" height="10" fill="${hair}"/><rect x="21" y="39" width="13" height="3" fill="${hair}"/>` : "";
+  const glasses = id === "marlow" ? `<rect x="15" y="25" width="11" height="7" fill="#c9d7e5" fill-opacity=".25" stroke="#38364e" stroke-width="2"/><rect x="29" y="25" width="11" height="7" fill="#c9d7e5" fill-opacity=".25" stroke="#38364e" stroke-width="2"/><rect x="26" y="27" width="3" height="2" fill="#38364e"/>` : id === "kit" ? `<rect x="15" y="25" width="10" height="5" fill="none" stroke="#3c4050" stroke-width="2"/><rect x="29" y="25" width="10" height="5" fill="none" stroke="#3c4050" stroke-width="2"/><rect x="25" y="27" width="5" height="2" fill="#3c4050"/>` : "";
+  const outfit = id === "marlow" ? `<rect x="17" y="45" width="21" height="27" fill="#24356d"/><rect x="17" y="45" width="21" height="5" fill="#526cb8"/><rect x="20" y="50" width="5" height="19" fill="#314986"/><rect x="29" y="50" width="5" height="19" fill="#182654"/><rect x="25" y="49" width="4" height="20" fill="#e7e8df"/>` :
+    id === "juniper" ? `<rect x="17" y="45" width="21" height="27" fill="#664091"/><rect x="17" y="45" width="21" height="5" fill="#a775d6"/><rect x="22" y="49" width="11" height="20" fill="#eee8e7"/><rect x="17" y="50" width="5" height="20" fill="#8153af"/><rect x="33" y="50" width="5" height="20" fill="#4e2d78"/>` :
+    id === "kit" ? `<rect x="17" y="45" width="21" height="27" fill="#285c9d"/><rect x="17" y="45" width="21" height="5" fill="#5a9cdb"/><rect x="21" y="50" width="13" height="16" fill="#3475b8"/><rect x="23" y="61" width="10" height="7" fill="#225084"/>` :
+    id === "wren" ? `<rect x="18" y="48" width="20" height="22" fill="#e09bbd"/><rect x="19" y="52" width="18" height="4" fill="#f4c5de"/><rect x="22" y="51" width="3" height="19" fill="#f4c5de"/><rect x="31" y="51" width="3" height="19" fill="#f4c5de"/><rect x="11" y="48" width="6" height="20" fill="#f3f0e8"/><rect x="37" y="48" width="6" height="20" fill="#f3f0e8"/>` :
+    id === "rowan" ? `<rect x="17" y="45" width="21" height="27" fill="#78437c"/><rect x="17" y="45" width="21" height="5" fill="#b460a5"/><rect x="21" y="49" width="13" height="22" fill="#6b4430"/><rect x="24" y="50" width="3" height="18" fill="#8d6143"/><rect x="31" y="50" width="3" height="18" fill="#4b3028"/>` :
+    id === "tove" ? `<rect x="17" y="45" width="21" height="27" fill="#8faee0"/><rect x="17" y="45" width="21" height="5" fill="#b5c9ed"/><rect x="20" y="50" width="15" height="20" fill="#9fbbe7"/><path d="M20 54h15M20 62h15M25 50v20M32 50v20" stroke="#dce8ff" stroke-width="2"/>` :
+    `<rect x="17" y="45" width="21" height="27" fill="#526d55"/><rect x="17" y="45" width="21" height="5" fill="#88a773"/><rect x="21" y="49" width="13" height="22" fill="#765132"/><rect x="23" y="50" width="3" height="20" fill="#936943"/><rect x="31" y="50" width="3" height="20" fill="#4e3728"/>`;
+  const legwear = id === "wren" ? "#e09bbd" : id === "kit" ? "#6b4430" : id === "rowan" || id === "piper" ? "#765132" : "#31313d";
+  const accessories = id === "kit" ? `<rect x="22" y="49" width="3" height="12" fill="#e5eef6"/><rect x="30" y="49" width="3" height="12" fill="#e5eef6"/><rect x="24" y="58" width="7" height="3" fill="#e5eef6"/>` : id === "tove" ? `<rect x="21" y="49" width="13" height="4" fill="#eef4ff"/><rect x="25" y="53" width="5" height="14" fill="#dce8ff"/>` : id === "marlow" ? `<rect x="25" y="49" width="4" height="11" fill="#f0c74f"/><rect x="22" y="50" width="10" height="3" fill="#f0c74f"/>` : id === "piper" ? `<rect x="22" y="44" width="10" height="5" fill="#d8a348"/><rect x="24" y="46" width="6" height="3" fill="#a8654e"/><rect x="20" y="58" width="4" height="3" fill="#d8a348"/><rect x="30" y="58" width="4" height="3" fill="#d8a348"/>` : "";
+  return `<svg class="avatar ${size}" viewBox="0 0 54 82" role="img" aria-label="${id} pixel character" shape-rendering="crispEdges"><rect x="9" y="47" width="8" height="24" fill="${coat}"/><rect x="38" y="47" width="8" height="24" fill="${coat}"/><rect x="11" y="66" width="7" height="7" fill="${skin}"/><rect x="37" y="66" width="7" height="7" fill="${skin}"/>${outfit}<rect x="19" y="70" width="7" height="11" fill="${legwear}"/><rect x="30" y="70" width="7" height="11" fill="${legwear}"/><rect x="13" y="16" width="28" height="25" fill="${skin}"/>${hairBack}<rect x="14" y="18" width="28" height="22" fill="${skin}"/><rect x="14" y="18" width="4" height="20" fill="#00000012"/><rect x="38" y="18" width="4" height="20" fill="#ffffff18"/>${hairFront}<rect x="20" y="27" width="3" height="3" fill="#252b3c"/><rect x="32" y="27" width="3" height="3" fill="#252b3c"/>${beard}${glasses}<rect x="25" y="34" width="5" height="2" fill="#b87973"/>${accessories}</svg>`;
 }
 
 async function api(url, options = {}) {
-  const response = await fetch(url, { ...options, headers: { "Content-Type": "application/json", ...(state.apiToken ? { "X-Agent-Team-Token": state.apiToken } : {}), ...(options.headers || {}) } });
+  const requestRepo = state.repo;
+  const response = await fetch(url, { ...options, headers: { "Content-Type": "application/json", ...(state.apiToken ? { "X-Agent-Team-Token": state.apiToken } : {}), ...(state.repo ? { "X-Agent-Team-Repository": encodeURIComponent(state.repo) } : {}), ...(options.headers || {}) } });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+  if (url !== "/api/bootstrap" && requestRepo !== state.repo) throw new Error("The repository changed while this request was working. Refresh the workshop.");
   return data;
 }
 
@@ -45,20 +60,24 @@ function notify(message, error = false) {
 
 async function refresh(quiet = false) {
   try {
+    const version = workspaceVersion;
     const data = await api("/api/bootstrap");
+    if (version !== workspaceVersion) return;
+    const repositoryChanged = Boolean(state.repo && state.repo !== data.repo);
     const previousRuns = state.runs;
     const previousSignature = JSON.stringify(previousRuns.map((run) => ({ id: run.id, status: run.status, plan: run.plan, tasks: run.tasks })));
     const goalDraft = $("#goal-input")?.value;
     const answerDraft = $("#answer-form input")?.value;
     Object.assign(state, data);
+    if (repositoryChanged) { state.selectedRun = null; state.review = null; dismissedPrompts.clear(); $("#review-modal")?.remove(); $("#repo-modal")?.remove(); $("#git-modal")?.remove(); $("#input-prompt")?.remove(); }
     if (!state.selectedRun || !state.runs.some((item) => item.id === state.selectedRun)) state.selectedRun = state.runs[0]?.id || null;
     renderSidebar();
-    if (!quiet || previousSignature !== JSON.stringify(state.runs.map((run) => ({ id: run.id, status: run.status, plan: run.plan, tasks: run.tasks })))) {
+    if (!quiet || repositoryChanged || previousSignature !== JSON.stringify(state.runs.map((run) => ({ id: run.id, status: run.status, plan: run.plan, tasks: run.tasks })))) {
       renderMain();
-      if (goalDraft !== undefined && $("#goal-input")) $("#goal-input").value = goalDraft;
-      if (answerDraft !== undefined && $("#answer-form input")) $("#answer-form input").value = answerDraft;
+      if (!repositoryChanged && goalDraft !== undefined && $("#goal-input")) $("#goal-input").value = goalDraft;
+      if (!repositoryChanged && answerDraft !== undefined && $("#answer-form input")) $("#answer-form input").value = answerDraft;
     } else if (currentRun()) void loadEvents(currentRun().id);
-    if (!quiet) renderPanel();
+    if (!quiet || repositoryChanged) renderPanel();
     if (state.view === "bench") void loadBench();
     const before = previousRuns.find((item) => item.id === state.selectedRun);
     const after = currentRun();
@@ -67,6 +86,8 @@ async function refresh(quiet = false) {
       if (after.status === "awaiting-review") notify("The team finished. Your review is ready.");
     }
     $("#repo-name").textContent = data.repo.split(/[\\/]/).pop();
+    $("#repo-button-name").textContent = data.repo.split(/[\\/]/).pop();
+    $("#repo-button").title = `Switch repository · ${data.repo}`;
   } catch (error) { if (!quiet) notify(error.message, true); }
 }
 
@@ -89,6 +110,14 @@ function agentStatus(id, run) {
   return "At their desk";
 }
 
+function agentStateClass(id, run) {
+  const status = agentStatus(id, run);
+  if (status === "Needs your input") return "attention";
+  if (["Working on a task", "Planning the goal", "Researching", "Preview running"].includes(status)) return "working";
+  if (["In review", "QA complete"].includes(status)) return "review";
+  return "idle";
+}
+
 function renderMain() {
   const main = $("#main-content");
   if (state.view === "library") {
@@ -106,9 +135,9 @@ function renderMain() {
     <section class="hero"><div class="hero-copy"><div class="eyebrow"><span class="spark">✦</span> A SMALL FACTORY FOR BIG IDEAS</div><h1>Good things are<br><em>built together.</em></h1><p>Give your team a goal, watch each desk light up, and step in when they need you.</p></div><div class="hero-cube" aria-hidden="true"><div class="cube-top"></div><div class="cube-left"></div><div class="cube-right"></div><span>✦</span></div></section>
     <form id="goal-form" class="goal-composer"><div class="composer-icon">✎</div><label for="goal-input"><strong>What should the team build?</strong><span>Describe a coding goal for this repository.</span></label><input id="goal-input" name="goal" maxlength="4000" placeholder="e.g. Add a friendly empty state to the dashboard" required><button class="primary-button" type="submit">Start goal <span>↗</span></button></form>
     ${blocked ? `<section class="summons" role="alert"><div class="summons-portrait">${avatar(worker || "marlow", "small")}</div><div class="summons-copy"><span class="eyebrow">A QUESTION FROM ${escapeHtml(worker || "THE TEAM")}</span><h2>${escapeHtml(profile(worker)?.name || "The team")} needs your help.</h2><p>${escapeHtml(blocked.error || "This task needs a decision before work can continue.")}</p><form id="answer-form"><input name="answer" maxlength="8000" aria-label="Your answer" placeholder="Type your answer or direction…" required><button class="primary-button">Send answer →</button></form></div></section>` : piperNeeds ? `<section class="summons" role="alert"><div class="summons-portrait">${avatar("piper", "small")}</div><div class="summons-copy"><span class="eyebrow">PIPER AT THE TEST BENCH</span><h2>Piper needs your help.</h2><p>${escapeHtml(run.preview.issue)}</p><button class="primary-button" data-view="bench">Open Test Bench →</button></div></section>` : ""}
-    ${run?.status === "awaiting-review" ? `<section class="review-banner"><div><span class="eyebrow">${run.baseCommit === state.head ? "READY FOR YOU" : "PAST RUN"}</span><h2>${run.baseCommit === state.head ? "The team has finished building." : "This build is still here to review."}</h2><p>${run.baseCommit === state.head ? "Review the changes and checks before merging into your main checkout." : "Your main checkout has moved on since this run. Start a new goal to build from the latest code."}</p></div><button class="secondary-button" id="review-button">Open review ↗</button></section>` : ""}
-    <section class="section-heading"><div><div class="eyebrow">MEET THE TEAM</div><h2>The workshop floor <span class="head-spark">✦</span></h2></div><p>Click a desk to chat, set its model, or open its journal.</p></section>
-    <div class="factory-floor">${state.profiles.map((item, index) => `<button class="station station-${item.id} ${state.selectedAgent === item.id ? "picked" : ""}" data-agent="${item.id}" style="--accent:${colors[item.id][0]};--order:${index}"><span class="station-top"><span class="station-number">0${index + 1} / 0${state.profiles.length}</span><span class="station-light ${agentStatus(item.id, run) === "Needs your input" ? "urgent" : ""}"></span></span><span class="station-scene"><span class="scene-glow"></span><span class="monitor"><span class="monitor-lines"><i></i><i></i><i></i></span></span>${avatar(item.id)}<span class="desk"><span class="desk-top"></span><span class="desk-front"></span></span></span><span class="station-info"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.specialty)}</small></span><span class="station-foot"><span class="tiny-dot"></span>${escapeHtml(agentStatus(item.id, run))}<span class="station-open">↗</span></span></button>`).join("")}</div>
+    ${run?.status === "awaiting-review" ? `<section class="review-banner"><div><span class="eyebrow">${run.baseCommit === state.head ? "READY FOR YOU" : "PAST RUN"}</span><h2>${run.baseCommit === state.head ? "The team has finished building." : "This build is still here to review."}</h2><p>${run.baseCommit === state.head ? "Review the changes and checks before merging into your main checkout." : "Your checkout has moved on. Open review to save local work and update this build to the latest code."}</p></div><button class="secondary-button" id="review-button">Open review ↗</button></section>` : ""}
+    <section class="section-heading"><div><div class="eyebrow"><span class="live-mark"></span> MEET THE TEAM</div><h2>The workshop floor <span class="head-spark">✦</span></h2></div><p>Click a desk to chat, set its model, or open its journal.</p></section>
+    <div class="factory-floor">${state.profiles.map((item, index) => { const status = agentStatus(item.id, run); return `<button class="station station-${item.id} ${state.selectedAgent === item.id ? "picked" : ""} ${agentStateClass(item.id, run)}" data-agent="${item.id}" style="--accent:${colors[item.id][0]};--order:${index}"><span class="station-top"><span class="station-number">0${index + 1} / 0${state.profiles.length}</span><span class="station-signal"><span class="station-light ${status === "Needs your input" ? "urgent" : ""}"></span><span class="signal-label">${status === "Needs your input" ? "NEEDS YOU" : status === "At their desk" ? "STANDBY" : "LIVE"}</span></span></span><span class="station-scene"><span class="scene-glow"></span><span class="monitor"><span class="monitor-lines"><i></i><i></i><i></i></span></span>${avatar(item.id)}<span class="desk"><span class="desk-top"></span><span class="desk-front"></span></span></span><span class="station-info"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.specialty)}</small></span><span class="station-foot"><span class="tiny-dot"></span>${escapeHtml(status)}<span class="station-open">↗</span></span></button>`; }).join("")}</div>
     <section class="lower-grid"><div class="wall-card"><div class="card-title"><span>▤</span><div><small>CURRENT GOAL</small><h3>Task wall</h3></div></div>${run ? `<p class="wall-goal">${escapeHtml(run.goal)}</p><div class="status-chip ${escapeHtml(run.status)}">${escapeHtml(run.status.replaceAll("-", " "))}</div>${run.plan ? `<div class="task-stack">${run.tasks.map((task) => { const plan = run.plan.tasks.find((item) => item.id === task.id); return `<div class="task-row"><span class="task-check ${escapeHtml(task.status)}">${task.status === "done" ? "✓" : task.status === "blocked" ? "!" : "•"}</span><div><strong>${escapeHtml(taskLabel(task, run))}</strong><small>${escapeHtml(profile(plan?.worker)?.name || "Team")} · ${escapeHtml(task.status)}</small></div></div>`; }).join("")}</div>` : `<p class="subtle">Marlow is drawing up a plan…</p>`}` : `<div class="wall-empty"><span>◇</span><p>No goal on the wall yet.<br>Start one above to set the workshop in motion.</p></div>`}</div><div class="activity-card"><div class="card-title"><span>✧</span><div><small>THE WORKSHOP</small><h3>Live notes</h3></div></div><div id="activity-list"><p class="subtle">${run ? "Loading recent activity…" : "The desks are ready. Your team's story starts with a goal."}</p></div></div></section>`;
   if (run) void loadEvents(run.id);
   if (blocked && !dismissedPrompts.has(run.id)) showInputPrompt(run, blocked, worker);
@@ -180,9 +209,10 @@ function renderPanel() {
   const item = profile(state.selectedAgent) || state.profiles[0]; if (!item) return;
   const effective = item.effective || { provider: "mock" };
   const chat = item.chat || [];
-  $("#detail-panel").innerHTML = `<div class="panel-head" style="--accent:${colors[item.id][0]}"><div class="panel-top"><span>PERSONAL DESK / 0${state.profiles.indexOf(item) + 1}</span><span class="panel-star">✦</span></div><div class="panel-person">${avatar(item.id, "panel-avatar")}<div><small>${escapeHtml(item.specialty)}</small><h2>${escapeHtml(item.name)}</h2><p>“${escapeHtml(moods[item.id])}”</p></div></div><div class="panel-tabs"><button class="${state.panelTab === "chat" ? "active" : ""}" data-tab="chat">Chat</button><button class="${state.panelTab === "journal" ? "active" : ""}" data-tab="journal">Journal</button><button class="${state.panelTab === "settings" ? "active" : ""}" data-tab="settings">Model</button></div></div>
+  $("#detail-panel").innerHTML = `<div class="panel-head" style="--accent:${colors[item.id][0]}"><div class="panel-top"><span>PERSONAL DESK / 0${state.profiles.indexOf(item) + 1}</span><span class="panel-star">✦</span></div><div class="panel-person">${avatar(item.id, "panel-avatar")}<div><small>${escapeHtml(item.specialty)}</small><h2>${escapeHtml(item.name)}</h2><p>“${escapeHtml(moods[item.id])}”</p></div></div><div class="panel-tabs"><button class="${state.panelTab === "chat" ? "active" : ""}" data-tab="chat">Chat</button><button class="${state.panelTab === "journal" ? "active" : ""}" data-tab="journal">Journal</button><button class="${state.panelTab === "performance" ? "active" : ""}" data-tab="performance">Review</button><button class="${state.panelTab === "settings" ? "active" : ""}" data-tab="settings">Model</button></div></div>
     <div class="panel-body">${state.panelTab === "chat" ? `<div class="chat-window" id="chat-window">${chat.length ? chat.map((entry) => `<div class="chat-bubble ${entry.role}"><span>${entry.role === "user" ? "YOU" : escapeHtml(item.name.toUpperCase())}</span><p>${escapeHtml(entry.text)}</p><small>${fmt(entry.at)}</small></div>`).join("") : `<div class="chat-empty"><span>✳</span><h3>Pull up a chair.</h3><p>Ask ${escapeHtml(item.name)} about the repository, a goal, or what they've been working on.</p></div>`}</div><form id="chat-form" class="chat-form"><textarea name="message" rows="2" maxlength="8000" placeholder="Message ${escapeHtml(item.name)}…" required></textarea><button class="send-button" aria-label="Send message">↗</button></form><p class="panel-hint">Conversations are saved to ${escapeHtml(item.name)}'s personal desk.</p>` : ""}
     ${state.panelTab === "journal" ? `<div class="journal-intro"><span>▤</span><h3>${escapeHtml(item.name)}'s journal</h3><p>A personal space for character, reminders, and the work they've done.</p></div><form id="journal-form"><label>PERSONALITY & TRAITS<textarea name="traits" rows="4" maxlength="4000" placeholder="How does this agent approach work?">${escapeHtml(item.traits)}</textarea></label><label>PINNED MEMORY<textarea name="memory" rows="6" maxlength="12000" placeholder="Facts or preferences this agent should carry into future work…">${escapeHtml(item.memory)}</textarea></label><button class="secondary-button" type="submit">Save journal</button></form><div class="journal-history"><h4>SEARCHABLE TIMELINE</h4><form id="timeline-form" class="timeline-form"><input name="query" maxlength="200" placeholder="Search work, features, or decisions…" aria-label="Search timeline"><div class="timeline-dates"><label>FROM<input name="from" type="date"></label><label>TO<input name="to" type="date"></label></div><details><summary>More filters</summary><input name="feature" maxlength="200" placeholder="Feature or task" aria-label="Feature filter"><input name="file" maxlength="300" placeholder="File path" aria-label="File filter"></details><button class="secondary-button" type="submit">Search journal</button></form><div id="timeline-list"><p class="subtle">Loading the timeline…</p></div></div>` : ""}
+    ${state.panelTab === "performance" ? `<div class="performance-intro"><span>◎</span><h3>Performance review</h3><p>Run two role-specific exercises. A second agent scores the answers, then ${escapeHtml(item.name)} turns the feedback into guidance for future work.</p><button class="primary-button" id="performance-review-button">Run performance review</button></div>${item.performanceGuidance ? `<div class="coaching-note"><small>CURRENT SELF-IMPROVEMENT NOTE</small><p>${escapeHtml(item.performanceGuidance)}</p></div>` : ""}<div class="evaluation-history">${(item.evaluations || []).length ? item.evaluations.map((evaluation) => `<article class="evaluation-card"><div class="evaluation-score"><strong>${escapeHtml(evaluation.score)}</strong><span>/ 100</span></div><div class="evaluation-copy"><time>${fmt(evaluation.at)} · reviewed by ${escapeHtml(profile(evaluation.evaluator)?.name || evaluation.evaluator)}</time><p>${escapeHtml(evaluation.summary)}</p><details><summary>Feedback and reflection</summary><strong>Strengths</strong><ul>${evaluation.strengths.map((entry) => `<li>${escapeHtml(entry)}</li>`).join("")}</ul><strong>Improve next</strong><ul>${evaluation.improvements.map((entry) => `<li>${escapeHtml(entry)}</li>`).join("")}</ul><p>${escapeHtml(evaluation.reflection)}</p></details></div></article>`).join("") : `<p class="subtle">No reviews yet. The first one will establish a baseline.</p>`}</div>` : ""}
     ${state.panelTab === "settings" ? `<div class="settings-intro"><span>◈</span><h3>Choose ${escapeHtml(item.name)}'s model</h3><p>Each desk can use its own provider and model. Your API keys stay in the local .env file.</p></div><form id="model-form"><label>PROVIDER<select name="provider" id="provider-select"><option value="mock" ${effective.provider === "mock" ? "selected" : ""}>Mock · demo mode</option><option value="openai" ${effective.provider === "openai" ? "selected" : ""}>OpenAI</option><option value="anthropic" ${effective.provider === "anthropic" ? "selected" : ""}>Anthropic</option><option value="bedrock" ${effective.provider === "bedrock" ? "selected" : ""}>Amazon Bedrock</option></select></label><label>MODEL NAME<input name="model" id="model-input" list="known-models" value="${escapeHtml(effective.model || "")}" placeholder="Choose or enter a model ID" spellcheck="false"><datalist id="known-models">${[...new Set(state.profiles.filter((person) => person.effective?.provider === effective.provider).map((person) => person.effective.model).filter(Boolean))].map((model) => `<option value="${escapeHtml(model)}"></option>`).join("")}</datalist></label><p class="model-note">Choose a model already used by the team, or enter another ID supported by your account. Saved choices apply to the next goal or chat.</p><button class="secondary-button" type="submit">Save model choice</button></form><div class="setting-foot"><span class="tiny-dot"></span> Current: ${escapeHtml(effective.provider)}${effective.model ? ` / ${escapeHtml(effective.model)}` : ""}</div>` : ""}</div>`;
   const chatWindow = $("#chat-window"); if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
   if (state.panelTab === "journal") void loadTimeline();
@@ -217,7 +247,7 @@ async function submitGoal(form) {
   finally { button.disabled = false; button.innerHTML = "Start goal <span>↗</span>"; }
 }
 
-async function watchJob(id) {
+async function watchJob(id, reviewRunId) {
   const timer = setInterval(async () => {
     try {
       const job = await api(`/api/jobs/${id}`);
@@ -227,19 +257,77 @@ async function watchJob(id) {
         clearInterval(timer); await refresh();
         if (job.status === "error") notify(job.error || "The run stopped.", true);
         else notify("The team has finished this step. Take a look at the task wall.");
+        if (reviewRunId && state.selectedRun === reviewRunId) await openReview();
       }
     } catch { clearInterval(timer); }
   }, 2500);
 }
 
 async function openReview() {
-  const run = currentRun(); if (!run) return;
+  let run = currentRun(); if (!run) return;
   try {
     state.review = await api(`/api/runs/${run.id}/review`);
+    if (currentRun()?.id !== run.id) return;
+    run = state.review.state;
+    $("#review-modal")?.remove();
     const modal = document.createElement("div"); modal.className = "modal-backdrop"; modal.id = "review-modal";
     modal.innerHTML = `<div class="review-modal" role="dialog" aria-modal="true" aria-label="Review team changes"><div class="review-header"><div><span class="eyebrow">BEFORE IT JOINS YOUR MAIN BRANCH</span><h2>Review the build</h2><p>${escapeHtml(run.goal)}</p></div><button class="icon-button" data-close="review" aria-label="Close review">✕</button></div><div class="review-scroll"><div class="review-summary"><h3>Marlow's note</h3><p>${escapeHtml(run.summary || "No summary yet.")}</p></div>${run.tasks.map((task) => `<div class="review-task"><strong>${escapeHtml(taskLabel(task, run))}</strong><span class="status-chip ${escapeHtml(task.status)}">${escapeHtml(task.status)}</span><p><b>Review:</b> ${escapeHtml(task.review || "Pending")}</p><p><b>QA:</b> ${escapeHtml(task.qa || "Pending")}</p><div class="check-list">${(task.checks || []).map((check) => `<span class="check ${escapeHtml(check.status)}">${escapeHtml(check.name)} · ${escapeHtml(check.status)}</span>`).join("")}</div></div>`).join("")}<h3>Code changes</h3><pre class="diff">${escapeHtml(state.review.diff || "No staged diff to show.")}</pre>${run.memoryNote ? `<div class="review-summary"><h3>Tove's pending library note</h3><p>${escapeHtml(run.memoryNote)}</p></div>` : ""}</div><div class="review-actions"><span>${run.baseCommit === state.head ? "Merge is local. Nothing is pushed." : "This run began from an older checkout and cannot merge here."}</span><button class="primary-button" id="merge-button" ${run.status !== "awaiting-review" || run.baseCommit !== state.head ? "disabled" : ""}>Merge reviewed work →</button></div></div>`;
+    const recovery = document.createElement("section"); recovery.className = "git-recovery";
+    recovery.innerHTML = gitRecoveryMarkup(state.review.readiness.git, state.review.readiness, run);
+    modal.querySelector(".review-scroll").prepend(recovery);
+    if (run.integrationHistory?.length) {
+      const note = document.createElement("p"); note.className = "subtle";
+      note.textContent = "The task review and QA notes below describe the original build. Review the combined diff and the updated checks above before merging.";
+      recovery.after(note);
+    }
+    const ready = state.review.readiness.canMerge && !Object.values(state.jobs).some((job) => job.status === "running");
+    modal.querySelector(".review-actions").innerHTML = `<span>${ready ? "Ready to merge locally into " + escapeHtml(state.review.readiness.git.branch) + "." : "Merge is unavailable. Use the Git actions above to clear the listed blockers."}</span><button class="primary-button" id="merge-button" ${ready ? "" : "disabled"}>${ready ? "Merge reviewed work →" : "Merge unavailable"}</button>`;
     document.body.append(modal);
   } catch (error) { notify(error.message, true); }
+}
+
+function gitRecoveryMarkup(status, readiness, run) {
+  const busy = Object.values(state.jobs).some((job) => job.status === "running");
+  const disabled = busy ? "disabled" : "";
+  const reasons = readiness?.reasons || [];
+  const checks = run?.integration?.checks || run?.integrationChecks || [];
+  return `<div class="git-status-head"><div><span class="eyebrow">GIT WORKSPACE</span><h3>${readiness ? readiness.canMerge ? "Ready to merge" : "Let's clear the merge blockers" : "Save your local work"}</h3></div><button class="secondary-button" id="git-refresh">Refresh Git status</button></div><p class="git-location">Branch <strong>${escapeHtml(status.branch)}</strong> · commit ${escapeHtml(status.head.slice(0, 8))}</p>${reasons.length ? `<ul class="git-blockers">${reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>` : ""}${busy ? `<p class="git-blockers">Wait for the current work to finish before using Git actions.</p>` : ""}
+    ${status.changes.length ? `<details class="git-local-changes" open><summary>${status.changes.length} local file changes</summary><form id="git-commit-form" data-head="${escapeHtml(status.head)}"><p>Select the files to save in a local commit. This commits on ${escapeHtml(status.branch)}.</p><div class="git-files">${status.changes.map((file) => { const secret = /(^|[\\/])\.env(?:\.|$)/.test(file.path) && !file.path.endsWith(".env.example"); return `<label><input type="checkbox" name="files" value="${escapeHtml(file.path)}" ${secret ? "disabled" : "checked"}><code>${escapeHtml(file.status)} ${escapeHtml(file.path)}</code>${secret ? " · kept local" : ""}</label>`; }).join("")}</div>${status.diff ? `<details><summary>Review local changes</summary><pre class="diff">${escapeHtml(status.diff)}</pre></details>` : ""}<label class="git-message">Commit message<input name="message" maxlength="500" placeholder="Describe the changes you're saving" required></label><button class="primary-button" ${disabled}>Save selected files as a commit</button></form></details>` : `<p class="git-clean">✓ Your repository has no unsaved changes.</p>`}
+    ${run?.status === "awaiting-review" && readiness?.stale && !run.integration ? `<div class="git-next-step"><p>Update this run in a new worktree using your current repository commit. Both versions are kept for review, and detected checks run again.</p><button class="secondary-button" id="git-update-run" ${busy || status.changes.length || readiness.stagingDirty ? "disabled" : ""}>Update run to latest code</button></div>` : ""}
+    ${run?.integration ? `<div class="git-next-step"><p>Update worktree: <code>${escapeHtml(readiness.integrationPath)}</code></p>${readiness.conflicts.map((conflict) => `<details class="git-conflict"><summary>Conflict: ${escapeHtml(conflict.path)}</summary><p>Choose one whole file version, or edit the combined file in the update worktree and stage your resolution there.</p><div class="git-versions"><div><h4>Your repository version</h4><pre>${escapeHtml(conflict.current)}</pre><button class="secondary-button" data-conflict="${escapeHtml(conflict.path)}" data-choice="current" ${disabled}>Keep repository file</button></div><div><h4>Team version</h4><pre>${escapeHtml(conflict.team)}</pre><button class="secondary-button" data-conflict="${escapeHtml(conflict.path)}" data-choice="team" ${disabled}>Keep team file</button></div></div></details>`).join("")}<button class="primary-button" id="git-finish-update" ${busy || readiness.conflicts.length ? "disabled" : ""}>Finish update and rerun checks</button></div>` : ""}
+    ${checks.length ? `<div class="git-next-step"><h4>Checks on the combined code</h4>${checks.map((check) => `<details class="git-check ${escapeHtml(check.status)}"><summary>${escapeHtml(check.name)} · ${escapeHtml(check.status)}</summary><pre>${escapeHtml(check.output)}</pre></details>`).join("")}</div>` : ""}
+    ${run?.needsPreviewReview ? `<div class="git-next-step"><p>The updated interface needs Wren's review before merging. This uses your selected models.</p><button class="primary-button" id="git-review-preview" ${disabled}>Review updated Test Bench</button></div>` : ""}`;
+}
+
+async function openGitTools() {
+  try {
+    const status = await api("/api/git/status");
+    $("#git-modal")?.remove();
+    const modal = document.createElement("div"); modal.className = "modal-backdrop"; modal.id = "git-modal";
+    modal.innerHTML = `<div class="repo-modal" role="dialog" aria-modal="true" aria-label="Git tools"><div class="review-header"><div><span class="eyebrow">${escapeHtml(state.repo.split(/[\\/]/).pop())}</span><h2>Git tools</h2><p>Save changes and prepare this repository for the next goal.</p></div><button class="icon-button" data-close="git" aria-label="Close Git tools">✕</button></div><div class="repo-picker-body">${gitRecoveryMarkup(status)}</div></div>`;
+    document.body.append(modal);
+  } catch (error) { notify(error.message, true); }
+}
+
+async function refreshGitView() { await refresh(); if ($("#review-modal")) await openReview(); else await openGitTools(); }
+
+function openRepositoryPicker() {
+  $("#repo-modal")?.remove();
+  const modal = document.createElement("div"); modal.className = "modal-backdrop"; modal.id = "repo-modal";
+  const repositories = state.repositories?.length ? state.repositories : [{ path: state.repo, name: state.repo.split(/[\\/]/).pop() }];
+  modal.innerHTML = `<div class="repo-modal" role="dialog" aria-modal="true" aria-labelledby="repo-picker-title"><div class="review-header"><div><span class="eyebrow">YOUR LOCAL PROJECTS</span><h2 id="repo-picker-title">Choose a repository</h2><p>Each repository has its own goals, agent journals, shared library, and Test Bench.</p></div><button class="icon-button" data-close="repo" aria-label="Close repository picker">✕</button></div><div class="repo-picker-body"><div class="recent-repos">${repositories.map((repo) => `<button class="recent-repo ${repo.path === state.repo ? "current" : ""}" data-repo-path="${escapeHtml(repo.path)}"><span class="repo-glyph">${repo.path === state.repo ? "◆" : "◇"}</span><span><strong>${escapeHtml(repo.name)}</strong><small>${escapeHtml(repo.path)}</small></span>${repo.path === state.repo ? `<b>CURRENT</b>` : `<b>OPEN</b>`}</button>`).join("")}</div><form id="repo-form" class="repo-form"><label for="repo-path">ADD A LOCAL GIT REPOSITORY</label><div><input id="repo-path" name="path" maxlength="2000" placeholder="C:\\path\\to\\repository" autocomplete="off" required><button class="primary-button" type="submit">Open repository →</button></div><p>Paste the path to a Git repository that already has at least one commit.</p></form></div></div>`;
+  document.body.append(modal);
+  $("#repo-path")?.focus();
+}
+
+async function switchRepository(repoPath) {
+  const result = await api("/api/repositories/select", { method: "POST", body: JSON.stringify({ path: repoPath }) });
+  workspaceVersion++;
+  state.repo = result.repo; state.repositories = result.repositories; state.selectedRun = null; state.review = null; state.view = "workshop";
+  if ($("#goal-input")) $("#goal-input").value = "";
+  if ($("#answer-form input")) $("#answer-form input").value = "";
+  dismissedPrompts.clear(); $("#repo-modal")?.remove(); $("#review-modal")?.remove(); $("#git-modal")?.remove(); $("#input-prompt")?.remove();
+  await refresh(); notify(`Opened ${state.repo.split(/[\\/]/).pop()}.`);
 }
 
 document.addEventListener("click", async (event) => {
@@ -249,9 +337,40 @@ document.addEventListener("click", async (event) => {
   if (target.dataset.agent) { state.selectedAgent = target.dataset.agent; state.panelTab = "chat"; renderMain(); renderPanel(); if (window.innerWidth <= 1050) $("#detail-panel").scrollIntoView({ behavior: "smooth" }); return; }
   if (target.dataset.tab) { state.panelTab = target.dataset.tab; renderPanel(); return; }
   if (target.dataset.close === "review") { $("#review-modal")?.remove(); return; }
+  if (target.dataset.close === "repo") { $("#repo-modal")?.remove(); return; }
+  if (target.dataset.close === "git") { $("#git-modal")?.remove(); return; }
   if (target.dataset.close === "input") { dismissedPrompts.add(state.selectedRun); $("#input-prompt")?.remove(); return; }
+  if (target.id === "repo-button") { openRepositoryPicker(); return; }
+  if (target.id === "git-tools-button") { await openGitTools(); return; }
+  if (target.id === "git-refresh") { await refreshGitView(); return; }
+  if (["git-update-run", "git-finish-update", "git-review-preview"].includes(target.id)) {
+    target.disabled = true;
+    const runId = currentRun()?.id;
+    try {
+      const action = { "git-update-run": "update", "git-finish-update": "finish-update", "git-review-preview": "review-preview" }[target.id];
+      const result = await api(`/api/runs/${runId}/${action}`, { method: "POST", body: JSON.stringify({ head: state.review.readiness.git.head }) });
+      watchJob(result.jobId, runId); notify("The run is being prepared. Its review will refresh when this step finishes.");
+    } catch (error) { target.disabled = false; notify(error.message, true); }
+    return;
+  }
+  if (target.dataset.conflict) {
+    target.disabled = true;
+    try { await api(`/api/runs/${currentRun().id}/resolve-conflict`, { method: "POST", body: JSON.stringify({ file: target.dataset.conflict, choice: target.dataset.choice }) }); await refreshGitView(); }
+    catch (error) { target.disabled = false; notify(error.message, true); }
+    return;
+  }
+  if (target.dataset.repoPath) { try { await switchRepository(target.dataset.repoPath); } catch (error) { notify(error.message, true); } return; }
   if (target.id === "refresh-button") { await refresh(); notify("Workshop refreshed."); }
   if (target.id === "review-button") await openReview();
+  if (target.id === "performance-review-button") {
+    const id = state.selectedAgent;
+    target.disabled = true; target.textContent = "Running exercises…";
+    try {
+      const result = await api(`/api/personas/${id}/performance-review`, { method: "POST", body: "{}" });
+      Object.assign(profile(id), result.profile); renderPanel(); notify(`${profile(id).name}'s performance review is complete.`);
+    } catch (error) { target.disabled = false; target.textContent = "Run performance review"; notify(error.message, true); }
+    return;
+  }
   if (target.id === "bench-start" || target.id === "bench-stop") {
     const run = currentRun(); if (!run) return;
     try { const result = await api(`/api/runs/${run.id}/preview/${target.id === "bench-start" ? "start" : "stop"}`, { method: "POST", body: "{}" }); if (result.jobId) watchJob(result.jobId); else await loadBench(); }
@@ -264,18 +383,24 @@ document.addEventListener("click", async (event) => {
   if (target.id === "merge-button") {
     target.disabled = true; target.textContent = "Merging…";
     try { await api(`/api/runs/${state.selectedRun}/merge`, { method: "POST", body: "{}" }); $("#review-modal")?.remove(); await refresh(); notify("Reviewed work merged into your local checkout."); }
-    catch (error) { target.disabled = false; target.textContent = "Merge reviewed work →"; notify(error.message, true); }
+    catch (error) { await openReview(); notify(error.message, true); }
   }
 });
 
 document.addEventListener("submit", async (event) => {
   const form = event.target;
-  if (!["goal-form", "answer-form", "answer-pop-form", "chat-form", "journal-form", "timeline-form", "model-form", "secret-form", "requested-secret-form"].includes(form.id)) return;
+  if (!["goal-form", "answer-form", "answer-pop-form", "chat-form", "journal-form", "timeline-form", "model-form", "secret-form", "requested-secret-form", "repo-form", "git-commit-form"].includes(form.id)) return;
   event.preventDefault();
   if (form.id === "goal-form") return submitGoal(form);
   if (form.id === "timeline-form") return loadTimeline(form);
   const button = form.querySelector("button[type=submit], button:not([type])"); if (button) button.disabled = true;
   try {
+    if (form.id === "git-commit-form") {
+      const data = new FormData(form);
+      await api("/api/git/commit", { method: "POST", body: JSON.stringify({ head: form.dataset.head, message: data.get("message"), files: data.getAll("files") }) });
+      await refreshGitView(); notify("Selected files saved in a local commit."); return;
+    }
+    if (form.id === "repo-form") { await switchRepository(new FormData(form).get("path")?.toString() || ""); return; }
     if (form.id === "secret-form") { await api("/api/secrets", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(form))) }); form.reset(); await loadBench(); notify("Secret saved to the shared shelf."); return; }
     if (form.id === "requested-secret-form") { const run = currentRun(); const info = await api(`/api/runs/${run.id}/preview`); const result = await api(`/api/runs/${run.id}/preview/resolve`, { method: "POST", body: JSON.stringify({ action: "secret", name: info.secret, value: new FormData(form).get("value") }) }); form.reset(); watchJob(result.jobId); await loadBench(); return; }
     if (form.id === "answer-form" || form.id === "answer-pop-form") {
@@ -312,6 +437,10 @@ document.addEventListener("change", (event) => {
   model.value = "";
   $("#known-models").innerHTML = [...new Set(state.profiles.filter((person) => person.effective?.provider === selected).map((person) => person.effective.model).filter(Boolean))].map((value) => `<option value="${escapeHtml(value)}"></option>`).join("");
   model.placeholder = selected === "mock" ? "No model needed" : "Choose or enter a model ID";
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") { $("#review-modal")?.remove(); $("#repo-modal")?.remove(); $("#git-modal")?.remove(); }
 });
 
 await refresh();

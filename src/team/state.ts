@@ -33,6 +33,10 @@ export interface TeamRunState {
   decisions?: Array<{ taskId: string; answer: string; at: string }>;
   summary?: string;
   memoryNote?: string;
+  integration?: { worktree: Worktree; baseCommit: string; checks?: CheckResult[] };
+  integrationChecks?: CheckResult[];
+  integrationHistory?: Array<{ staging: Worktree; baseCommit: string }>;
+  needsPreviewReview?: boolean;
   preview?: PreviewInfo & { approvedKeys?: string[]; piperAttempts?: number; visualFixAttempted?: boolean };
   libraryPath: string;
   runDir: string;
