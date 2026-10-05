@@ -45,9 +45,17 @@ async function refresh(quiet = false) {
   try {
     const data = await api("/api/bootstrap");
     const previousRuns = state.runs;
+    const previousSignature = JSON.stringify(previousRuns.map((run) => ({ id: run.id, status: run.status, plan: run.plan, tasks: run.tasks })));
+    const goalDraft = $("#goal-input")?.value;
+    const answerDraft = $("#answer-form input")?.value;
     Object.assign(state, data);
     if (!state.selectedRun || !state.runs.some((item) => item.id === state.selectedRun)) state.selectedRun = state.runs[0]?.id || null;
-    renderSidebar(); renderMain();
+    renderSidebar();
+    if (!quiet || previousSignature !== JSON.stringify(state.runs.map((run) => ({ id: run.id, status: run.status, plan: run.plan, tasks: run.tasks })))) {
+      renderMain();
+      if (goalDraft !== undefined && $("#goal-input")) $("#goal-input").value = goalDraft;
+      if (answerDraft !== undefined && $("#answer-form input")) $("#answer-form input").value = answerDraft;
+    } else if (currentRun()) void loadEvents(currentRun().id);
     if (!quiet) renderPanel();
     const before = previousRuns.find((item) => item.id === state.selectedRun);
     const after = currentRun();
