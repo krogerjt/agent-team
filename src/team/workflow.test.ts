@@ -31,7 +31,14 @@ test("six personas move dependent tasks through separate worktrees and wait for 
   function fake(name: string): ModelProvider & { generateWithTools(request: ToolRequest): Promise<ToolResponse> } {
     return {
       name,
-      async generate(_request: ModelRequest): Promise<ModelResponse> { return { text: name === "tove" ? "Verified note wording after checks." : "Ready for human review." }; },
+      async generate(request: ModelRequest): Promise<ModelResponse> {
+        if (name === "tove") {
+          assert.match(request.userPrompt, /final world/);
+          assert.match(request.userPrompt, /QA: PASS:/);
+          return { text: "Verified note wording after checks." };
+        }
+        return { text: "Ready for human review." };
+      },
       async generateWithTools(request: ToolRequest): Promise<ToolResponse> {
         calls.push(name);
         if (name === "marlow" && request.userPrompt.includes("return ONLY a JSON")) return { text: JSON.stringify(plan), toolCalls: 0 };

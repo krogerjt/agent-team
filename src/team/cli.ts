@@ -25,6 +25,7 @@ async function main(): Promise<void> {
   if (command === "status") {
     const state = await loadState(value(args, "--run"));
     console.log(`Goal: ${state.goal}\nStatus: ${state.status}\nPlan: ${state.plan?.summary ?? "pending"}`);
+    if (state.summary) console.log(`Marlow's summary: ${state.summary}`);
     for (const task of state.tasks) console.log(`${task.id}: ${task.status}${task.error ? ` | ${task.error}` : ""}`);
     return;
   }
@@ -63,6 +64,7 @@ async function main(): Promise<void> {
   if (command === "review") {
     const { state, diff } = await reviewTeamRun(value(args, "--run"));
     console.log(`Goal: ${state.goal}\nStatus: ${state.status}\nPlan: ${state.plan?.summary ?? "pending"}`);
+    if (state.summary) console.log(`Marlow's summary: ${state.summary}`);
     for (const task of state.tasks) {
       console.log(`\n${task.id}: ${task.status} | worktree: ${task.worktree?.path ?? "none"}`);
       if (task.review) console.log(`Review: ${task.review}`);
