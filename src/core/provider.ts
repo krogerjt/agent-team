@@ -1,6 +1,7 @@
 export interface ModelRequest {
   systemPrompt: string;
   userPrompt: string;
+  images?: Array<{ mimeType: "image/png" | "image/jpeg" | "image/webp"; data: string }>;
 }
 
 export interface ModelResponse {

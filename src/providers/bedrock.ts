@@ -11,7 +11,10 @@ export class BedrockProvider implements ToolCapableProvider {
     const response = await this.client.send(new ConverseCommand({
       modelId: this.model,
       system: [{ text: request.systemPrompt }],
-      messages: [{ role: "user", content: [{ text: request.userPrompt }] }],
+      messages: [{ role: "user", content: [
+        { text: request.userPrompt },
+        ...(request.images ?? []).map((item) => ({ image: { format: item.mimeType.split("/")[1] as "png" | "jpeg" | "webp", source: { bytes: Buffer.from(item.data, "base64") } } })),
+      ] }],
       inferenceConfig: { maxTokens: 2048 },
     }));
     return {

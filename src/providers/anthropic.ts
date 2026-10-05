@@ -12,7 +12,10 @@ export class AnthropicProvider implements ToolCapableProvider {
       model: this.model,
       max_tokens: 2048,
       system: request.systemPrompt,
-      messages: [{ role: "user", content: request.userPrompt }],
+      messages: [{ role: "user", content: request.images?.length ? [
+        ...request.images.map((item) => ({ type: "image" as const, source: { type: "base64" as const, media_type: item.mimeType, data: item.data } })),
+        { type: "text" as const, text: request.userPrompt },
+      ] : request.userPrompt }],
     });
     return {
       text: response.content

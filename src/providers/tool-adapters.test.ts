@@ -56,3 +56,20 @@ test("Bedrock returns tool results with the matching toolUseId", async () => {
   assert.equal(response.toolCalls, 1);
   assert.match(JSON.stringify(requests[1]), /toolUseId":"tool-1"/);
 });
+
+test("all providers send Wren's screenshot as image input", async () => {
+  const image = { mimeType: "image/png" as const, data: Buffer.from("picture").toString("base64") };
+  const request = { systemPrompt: "review", userPrompt: "Inspect this page", images: [image] };
+  let openaiInput: unknown;
+  await new OpenAIProvider("model", { responses: { create: async (body: unknown) => { openaiInput = body; return { output_text: "seen" }; } } } as never).generate(request);
+  assert.match(JSON.stringify(openaiInput), /input_image/);
+  assert.match(JSON.stringify(openaiInput), /data:image\/png;base64/);
+  let anthropicInput: unknown;
+  await new AnthropicProvider("model", { messages: { create: async (body: unknown) => { anthropicInput = body; return { content: [{ type: "text", text: "seen" }] }; } } } as never).generate(request);
+  assert.match(JSON.stringify(anthropicInput), /"type":"image"/);
+  assert.match(JSON.stringify(anthropicInput), /"media_type":"image\/png"/);
+  let bedrockInput: unknown;
+  await new BedrockProvider("model", { send: async (command: { input: unknown }) => { bedrockInput = command.input; return { output: { message: { content: [{ text: "seen" }] } } }; } } as never).generate(request);
+  assert.match(JSON.stringify(bedrockInput), /"image"/);
+  assert.match(JSON.stringify(bedrockInput), /"format":"png"/);
+});

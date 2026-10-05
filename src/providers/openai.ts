@@ -11,7 +11,10 @@ export class OpenAIProvider implements ToolCapableProvider {
     const response = await this.client.responses.create({
       model: this.model,
       instructions: request.systemPrompt,
-      input: request.userPrompt,
+      input: request.images?.length ? [{ role: "user" as const, content: [
+        { type: "input_text" as const, text: request.userPrompt },
+        ...request.images.map((item) => ({ type: "input_image" as const, image_url: `data:${item.mimeType};base64,${item.data}`, detail: "high" as const })),
+      ] }] : request.userPrompt,
     });
     return { text: response.output_text };
   }

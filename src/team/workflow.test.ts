@@ -55,7 +55,7 @@ test("six personas move dependent tasks through separate worktrees and wait for 
   }
   const providers: TeamProviders = {
     marlow: fake("marlow"), juniper: fake("juniper"), kit: fake("kit"),
-    wren: fake("wren"), rowan: fake("rowan"), tove: fake("tove"),
+    wren: fake("wren"), rowan: fake("rowan"), tove: fake("tove"), piper: fake("piper"),
   };
   const state = await runTeamGoal(root, "Improve the note", providers);
   assert.equal(state.status, "awaiting-review");
@@ -105,7 +105,7 @@ test("unresolved review blocks integration and merge after one repair pass", asy
   }
   const providers: TeamProviders = {
     marlow: fake("marlow"), juniper: fake("juniper"), kit: fake("kit"),
-    wren: fake("wren"), rowan: fake("rowan"), tove: fake("tove"),
+    wren: fake("wren"), rowan: fake("rowan"), tove: fake("tove"), piper: fake("piper"),
   };
   const state = await runTeamGoal(root, "Edit note", providers);
   assert.equal(edits, 2);
@@ -141,7 +141,7 @@ test("a human answer resumes a blocked worker in the same worktree", async () =>
   }
   const providers: TeamProviders = {
     marlow: fake("marlow"), juniper: fake("juniper"), kit: fake("kit"),
-    wren: fake("wren"), rowan: fake("rowan"), tove: fake("tove"),
+    wren: fake("wren"), rowan: fake("rowan"), tove: fake("tove"), piper: fake("piper"),
   };
   const blocked = await runTeamGoal(root, "Edit note", providers);
   assert.equal(blocked.status, "blocked");

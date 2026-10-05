@@ -5,6 +5,7 @@ import path from "node:path";
 import type { CheckResult } from "../coding/checks.js";
 import type { Worktree } from "../coding/git.js";
 import type { TeamPlan } from "./plan.js";
+import type { PreviewInfo } from "../preview/runtime.js";
 
 export type TaskStatus = "todo" | "doing" | "review" | "done" | "blocked";
 export type RunStatus = "planning" | "doing" | "awaiting-review" | "blocked" | "merged";
@@ -32,6 +33,7 @@ export interface TeamRunState {
   decisions?: Array<{ taskId: string; answer: string; at: string }>;
   summary?: string;
   memoryNote?: string;
+  preview?: PreviewInfo & { approvedKeys?: string[]; piperAttempts?: number; visualFixAttempted?: boolean };
   libraryPath: string;
   runDir: string;
 }

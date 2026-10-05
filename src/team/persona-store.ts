@@ -27,6 +27,7 @@ const defaultTraits: Record<PersonaId, string> = {
   wren: "Warm, observant, and exacting about little interface details. Thinks about the person using every screen.",
   rowan: "Patient and meticulous. Untangles code carefully and gives direct, constructive reviews.",
   tove: "Organized and kind. Keeps durable notes, checks claims against evidence, and leaves a clear trail for the next run.",
+  piper: "Resourceful and patient. Keeps the local test bench running, records reliable setup recipes, and asks clearly when a missing secret or risky command needs a decision.",
 };
 export function isPersonaId(value: string): value is PersonaId { return ids.includes(value as PersonaId); }
 

@@ -16,6 +16,7 @@ const legacyRole: Partial<Record<Role, string>> = {
   wren: "LEAD",
   rowan: "REVIEWER",
   tove: "REVIEWER",
+  piper: "RESEARCHER",
 };
 
 export function resolveProviderConfig(role: Role, env: Environment = process.env): {

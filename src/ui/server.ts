@@ -7,15 +7,19 @@ import { fileURLToPath } from "node:url";
 import { git } from "../coding/git.js";
 import { roster, type PersonaId } from "../personas/roster.js";
 import { effectiveModel, isPersonaId, readPersona, updatePersona } from "../team/persona-store.js";
-import { loadState, readLibrary, repoHome, type TeamRunState } from "../team/state.js";
-import { answerTeamRun, chatTeamPersona, mergeTeamRun, messageTeamPersona, reviewTeamRun, runTeamGoal } from "../team/workflow.js";
+import { loadState, readLibrary, repoHome, saveState, type TeamRunState } from "../team/state.js";
+import { answerTeamRun, chatTeamPersona, mergeTeamRun, messageTeamPersona, reviewTeamRun, runTeamGoal, resumeTeamPreview, startTeamPreview } from "../team/workflow.js";
 import { getTimelineEntry, searchTimeline } from "../team/timeline.js";
+import { listSecrets, setSecret } from "../preview/secrets.js";
+import { livePreview, stopAllPreviews, stopPreview } from "../preview/runtime.js";
+import { readCookbook } from "../preview/cookbook.js";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const repoArg = process.argv[2] ?? ".";
 const port = Number(process.env.AGENT_TEAM_PORT ?? 4173);
 const jobs = new Map<string, { status: "running" | "done" | "error"; runId?: string; error?: string }>();
 const activeRuns = new Set<string>();
+const apiToken = randomUUID();
 
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
@@ -75,13 +79,22 @@ async function serve(req: IncomingMessage, res: ServerResponse, repo: string): P
   const method = req.method ?? "GET";
   if (method !== "GET") {
     const origin = req.headers.origin;
-    if (origin && new URL(origin).hostname !== "127.0.0.1" && new URL(origin).hostname !== "localhost") throw new Error("Request origin is not local.");
+    if (origin && ![`http://127.0.0.1:${port}`, `http://localhost:${port}`].includes(origin)) throw new Error("Request origin is not this workshop.");
+    if (req.headers["x-agent-team-token"] !== apiToken) throw new Error("Workshop request token is missing.");
   }
   if (method === "GET" && url.pathname === "/api/bootstrap") {
     const ids = Object.keys(roster) as PersonaId[];
     const profiles = await Promise.all(ids.map(async (id) => ({ ...await readPersona(repo, id), effective: await effectiveModel(repo, id), ...roster[id] })));
-    json(res, 200, { repo, head: await git(repo, ["rev-parse", "HEAD"]), profiles, runs: await runs(repo), library: await readLibrary({ libraryPath: path.join(repoHome(repo), "library.md") }), jobs: Object.fromEntries(jobs) });
+    json(res, 200, { repo, head: await git(repo, ["rev-parse", "HEAD"]), profiles, runs: await runs(repo), library: await readLibrary({ libraryPath: path.join(repoHome(repo), "library.md") }), jobs: Object.fromEntries(jobs), apiToken });
     return;
+  }
+  if (url.pathname === "/api/secrets") {
+    if (method === "GET") { json(res, 200, { names: await listSecrets() }); return; }
+    if (method === "POST") {
+      const input = await body(req);
+      await setSecret(string(input.name, "a secret name", 100), string(input.value, "a secret value", 20_000));
+      json(res, 200, { names: await listSecrets() }); return;
+    }
   }
   if (method === "GET" && url.pathname.startsWith("/api/jobs/")) {
     json(res, 200, jobs.get(url.pathname.slice(10)) ?? { status: "error", error: "Job not found." });
@@ -163,11 +176,44 @@ async function serve(req: IncomingMessage, res: ServerResponse, repo: string): P
       json(res, 200, await mergeTeamRun(runDir)); return;
     }
   }
+  const previewMatch = /^\/api\/runs\/([^/]+)\/preview(?:\/(start|stop|resolve|screenshot))?$/.exec(url.pathname);
+  if (previewMatch) {
+    const runDir = runPath(repo, previewMatch[1]);
+    const action = previewMatch[2];
+    const state = await loadState(runDir);
+    if (method === "GET" && !action) { const current = livePreview(state.id); json(res, 200, { ...state.preview, ...current, live: current?.status === "healthy", cookbook: await readCookbook(repo) }); return; }
+    if (method === "GET" && action === "screenshot") {
+      if (!state.preview?.screenshot || !state.preview.screenshot.startsWith(path.join(runDir, "preview") + path.sep)) { json(res, 404, { error: "No screenshot yet." }); return; }
+      res.writeHead(200, { "Content-Type": "image/png", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
+      res.end(await readFile(state.preview.screenshot)); return;
+    }
+    if (method === "POST" && action === "stop") {
+      await stopPreview(state.id);
+      if (state.preview) { state.preview.status = "stopped"; state.preview.url = undefined; await saveState(state); }
+      json(res, 200, { status: "stopped" }); return;
+    }
+    if (method === "POST" && action === "start") { if (activeRuns.has(state.id)) throw new Error("This run is already working."); activeRuns.add(state.id); json(res, 202, { jobId: launch(() => startTeamPreview(runDir), state.id) }); return; }
+    if (method === "POST" && action === "resolve") {
+      if (activeRuns.has(state.id)) throw new Error("This run is already working.");
+      const input = await body(req);
+      if (input.action === "reject") { json(res, 200, { status: "blocked" }); return; }
+      if (input.action === "secret") {
+        if (state.preview?.status !== "waiting-secret" || input.name !== state.preview.secret) throw new Error("This secret is not requested by Piper.");
+        await setSecret(string(input.name, "a secret name", 100), string(input.value, "a secret value", 20_000));
+      } else if (input.action !== "approve" || state.preview?.status !== "waiting-approval") throw new Error("No command is awaiting approval.");
+      const approved = input.action === "approve" ? state.preview.command : undefined;
+      activeRuns.add(state.id);
+      json(res, 202, { jobId: launch(() => resumeTeamPreview(runDir, approved), state.id) }); return;
+    }
+  }
   const assets: Record<string, [string, string]> = {
     "/": ["index.html", "text/html; charset=utf-8"],
     "/app.js": ["app.js", "text/javascript; charset=utf-8"],
     "/styles.css": ["styles.css", "text/css; charset=utf-8"],
   };
+  if (method === "GET" && url.pathname === "/favicon.ico") {
+    res.writeHead(204, { "Cache-Control": "no-store" }); res.end(); return;
+  }
   if (method === "GET" && assets[url.pathname]) {
     const [name, contentType] = assets[url.pathname];
     res.writeHead(200, { "Content-Type": contentType, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
@@ -184,6 +230,7 @@ async function main(): Promise<void> {
     void serve(req, res, repo).catch((error: unknown) => json(res, 400, { error: error instanceof Error ? error.message : String(error) }));
   });
   server.listen(port, "127.0.0.1", () => console.log(`Agent Team workshop: http://127.0.0.1:${port}\nRepository: ${repo}`));
+  for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => { void stopAllPreviews().finally(() => server.close()); });
 }
 
 main().catch((error: unknown) => { console.error(error); process.exitCode = 1; });

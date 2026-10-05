@@ -26,4 +26,5 @@ test("new personas inherit existing role settings unless overridden", () => {
   const env = { LEAD_PROVIDER: "openai", LEAD_MODEL: "base", OPENAI_API_KEY: "test-key", WREN_MODEL: "design" };
   assert.deepEqual(resolveProviderConfig("kit", env), { provider: "openai", model: "base" });
   assert.deepEqual(resolveProviderConfig("wren", env), { provider: "openai", model: "design" });
+  assert.deepEqual(resolveProviderConfig("piper", { RESEARCHER_PROVIDER: "openai", RESEARCHER_MODEL: "research", OPENAI_API_KEY: "test-key" }), { provider: "openai", model: "research" });
 });

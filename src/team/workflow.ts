@@ -8,8 +8,15 @@ import { orderedTasks, parsePlan, type TeamTask } from "./plan.js";
 import { appendLibrary, createRunState, loadState, logEvent, readLibrary, repoHome, saveState, type TaskState, type TeamRunState } from "./state.js";
 import { appendChat, configuredProvider, personaContext, readPersona } from "./persona-store.js";
 import { appendTimeline, ensureTimeline, executeMemoryTool, memoryTools } from "./timeline.js";
+import { readFile, readdir } from "node:fs/promises";
+import path from "node:path";
+import { extractCookbook, readCookbook, saveCookbook, type Cookbook } from "../preview/cookbook.js";
+import { livePreview, startPreview, stopPreview, PreviewFailure, PreviewPause, PreviewStopped, type PreviewInfo } from "../preview/runtime.js";
+import { inspectPreview, runBrowserSteps, screenshotData, type BrowserStep } from "../preview/browser.js";
 
 export type TeamProviders = Record<PersonaId, ModelProvider>;
+const stopPreviewTool = { name: "stop_preview", description: "Stop the local preview for this run when it is no longer needed.", parameters: { type: "object", properties: {}, required: [], additionalProperties: false } };
+const startPreviewTool = { name: "start_preview", description: "Start or inspect the staged web preview. The host follows Piper's cookbook and waits for it to become healthy.", parameters: { type: "object", properties: {}, required: [], additionalProperties: false } };
 
 async function defaultProviders(repo: string): Promise<TeamProviders> {
   const entries = await Promise.all((Object.keys(roster) as PersonaId[]).map(async (id) => [id, await configuredProvider(repo, id)] as const));
@@ -48,8 +55,15 @@ async function askWithTools(
   const response = await provider.generateWithTools({
     systemPrompt: `${roster[persona].systemPrompt}\n${personal}`,
     userPrompt: prompt,
-    tools: [...tools.definitions, ...memoryTools],
+    tools: [...tools.definitions, ...memoryTools, stopPreviewTool, ...(state.tasks.length && state.tasks.every((task) => task.status === "done") && persona !== "piper" ? [startPreviewTool] : [])],
     execute: async (name, args) => {
+      if (name === "stop_preview") { await stopPreview(state.id); if (state.preview) { state.preview.status = "stopped"; state.preview.url = undefined; await saveState(state); } return { content: "Preview stopped." }; }
+      if (name === "start_preview") {
+        if (!state.tasks.length || !state.tasks.every((task) => task.status === "done") || persona === "piper") return { content: "Preview becomes available after the staged build is complete.", isError: true };
+        if (livePreview(state.id)?.status === "healthy") return { content: `Preview healthy: ${state.preview?.url}` };
+        const info = await obtainPreview(state, await configuredProvider(state.repo, "piper"));
+        return { content: info?.url ? `Preview healthy: ${info.url}` : `Preview paused: ${state.preview?.issue ?? "unknown reason"}`, isError: !info };
+      }
       if (name === "search_memory" || name === "get_memory_entry") {
         await logEvent(state, persona, "memory-lookup", `${name} ${JSON.stringify(args).slice(0, 300)}`);
         return executeMemoryTool(state.repo, persona, name, args);
@@ -182,12 +196,178 @@ async function advanceRun(state: TeamRunState, providers: TeamProviders, library
       break;
     }
   }
-  if (state.status !== "blocked") {
+  if (state.status !== "blocked") return finishRun(state, providers, library);
+  await saveState(state);
+  return state;
+}
+
+async function isWebProject(repo: string): Promise<boolean> {
+  try { if (await readCookbook(repo)) return true; } catch { return true; }
+  try {
+    const pkg = JSON.parse(await readFile(path.join(repo, "package.json"), "utf8")) as { scripts?: Record<string, string> };
+    if (["dev", "start", "serve", "ui", "preview"].some((name) => pkg.scripts?.[name])) return true;
+  } catch { /* another project type */ }
+  for (const file of ["index.html", "vite.config.ts", "next.config.js", "manage.py"]) {
+    try { await readFile(path.join(repo, file)); return true; } catch { /* not found */ }
+  }
+  try {
+    for (const name of await readdir(repo)) if (name.endsWith(".csproj") && /Microsoft\.NET\.Sdk\.Web/.test(await readFile(path.join(repo, name), "utf8"))) return true;
+  } catch { /* not a root .NET web project */ }
+  for (const file of ["requirements.txt", "pyproject.toml"]) {
+    try { if (/\b(flask|django|fastapi|streamlit|uvicorn)\b/i.test(await readFile(path.join(repo, file), "utf8"))) return true; } catch { /* not configured */ }
+  }
+  return false;
+}
+
+async function piperCookbook(state: TeamRunState, provider: ModelProvider, failure?: string): Promise<Cookbook> {
+  const previous = await readCookbook(state.repo);
+  const prompt = `Goal: ${state.goal}\nRepository: ${state.repo}\n${previous ? `Current cookbook: ${JSON.stringify(previous)}\n` : ""}${failure ? `Preview failed: ${failure.slice(0, 3_000)}\nRedacted command log:\n${state.preview?.log.slice(-3_000) ?? "(none)"}\n` : ""}Inspect the repository and return ONLY a JSON cookbook: {"version":1,"workingDir":".","setup":["..."],"build":[],"start":"...","healthPath":"/","variables":{"APP_PORT":"{port}"},"secrets":{"APP_SECRET":"vault-name"}}. All commands run in the staging worktree. Use {port} in command or variables so the app binds to 127.0.0.1 on the assigned port. Do not edit code. If the failure requires a code change rather than a cookbook change, reply CODE_CHANGE_NEEDED: with the exact diagnosis.`;
+  const text = await askWithTools(state, "piper", requireToolProvider(provider), prompt, new WorkspaceTools(state.staging!.path, "researcher"));
+  if (/^CODE_CHANGE_NEEDED:/i.test(text)) throw new Error(text.trim());
+  const book = extractCookbook(text);
+  await saveCookbook(state.repo, book);
+  await recordRunEvent(state, "piper", "cookbook", `Saved preview setup: ${book.start}`, { summary: "Updated the environment cookbook" });
+  return book;
+}
+
+async function obtainPreview(state: TeamRunState, piper: ModelProvider): Promise<PreviewInfo | undefined> {
+  if (!await isWebProject(state.staging!.path)) return undefined;
+  let book: Cookbook | undefined;
+  try { book = await readCookbook(state.repo); if (!book) book = await piperCookbook(state, piper); }
+  catch (error) { state.preview = { status: "failed", log: "", issue: `Piper could not prepare the cookbook: ${error instanceof Error ? error.message : String(error)}` }; state.status = "blocked"; await saveState(state); return undefined; }
+  let attempts = state.preview?.piperAttempts ?? 0;
+  for (;;) {
+    try {
+      const info = await startPreview(state, book, state.preview?.approvedKeys ?? []);
+      state.preview = { ...state.preview, ...info, piperAttempts: attempts };
+      await saveState(state);
+      await recordRunEvent(state, "piper", "preview-ready", info.url ?? "", { summary: "Started the local preview" });
+      return state.preview;
+    } catch (error) {
+      if (error instanceof PreviewStopped) { state.preview = { ...state.preview, status: "stopped", log: state.preview?.log ?? "", issue: "Preview was stopped." }; state.status = "blocked"; await saveState(state); return undefined; }
+      if (error instanceof PreviewPause) {
+        state.preview = { ...state.preview, status: error.kind === "approval" ? "waiting-approval" : "waiting-secret", log: state.preview?.log ?? "", issue: error.message,
+          port: error.port,
+          command: error.kind === "approval" ? error.value : undefined, commandKey: error.kind === "approval" ? error.key : undefined,
+          secret: error.kind === "secret" ? error.value : undefined, piperAttempts: attempts };
+        state.status = "blocked"; await saveState(state); return undefined;
+      }
+      attempts++;
+      const detail = error instanceof Error ? error.message : String(error);
+      state.preview = { ...state.preview, ...(error instanceof PreviewFailure ? error.info : {}), status: "failed", log: error instanceof PreviewFailure ? error.info.log : state.preview?.log ?? "", issue: detail, piperAttempts: attempts };
+      await recordRunEvent(state, "piper", "preview-failed", detail, { summary: `Preview setup failed (attempt ${attempts})` });
+      if (attempts > 4) {
+        const diagnosis = await askWithTools(state, "piper", requireToolProvider(piper),
+          `Preview setup failed after four cookbook revisions. Goal: ${state.goal}\nCookbook: ${JSON.stringify(book)}\nFailure: ${detail}\nRedacted command log:\n${state.preview.log.slice(-3_000)}\nExplain the likely application code change needed, with file hints. Do not edit code.`, new WorkspaceTools(state.staging!.path, "researcher"));
+        state.preview.issue = diagnosis;
+        state.status = "blocked"; await saveState(state); return undefined;
+      }
+      try { book = await piperCookbook(state, piper, detail); }
+      catch (repairError) { state.preview.issue = repairError instanceof Error ? repairError.message : String(repairError); state.status = "blocked"; await saveState(state); return undefined; }
+      state.preview.piperAttempts = attempts;
+      await saveState(state);
+    }
+  }
+}
+
+function parseScenarios(text: string): BrowserStep[] {
+  try {
+    const cleaned = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+    const parsed = JSON.parse(cleaned) as { scenarios?: BrowserStep[] };
+    return Array.isArray(parsed.scenarios) ? parsed.scenarios.filter((step) => step &&
+      (step.action === "navigate" && typeof step.path === "string" && step.path.startsWith("/") ||
+       step.action === "expectText" && typeof step.text === "string" && Boolean(step.text) ||
+       (step.action === "click" || step.action === "fill") && typeof step.role === "string" && typeof step.name === "string" &&
+         (step.action === "click" || typeof step.value === "string"))).slice(0, 8) : [];
+  } catch { return []; }
+}
+
+async function visualReview(state: TeamRunState, providers: TeamProviders, info: PreviewInfo): Promise<boolean> {
+  const capture = await inspectPreview(state, info);
+  const images = await screenshotData(info);
+  const prompt = `Goal: ${state.goal}\nReview the combined web interface. Accessible page structure:\n${capture.structure}\nBrowser console errors: ${JSON.stringify(capture.errors)}\nReturn a short JSON object with scenarios (up to 8 steps, each action navigate|click|fill|expectText, path or accessible role/name, optional value/text) that verify the goal. Do not claim an interaction passed yet.`;
+  let proposed: string;
+  let visualVerified = false;
+  try {
+    proposed = (await providers.wren.generate({ systemPrompt: roster.wren.systemPrompt, userPrompt: prompt, images: images ? [{ mimeType: "image/png", data: images }] : undefined })).text;
+    visualVerified = Boolean(images);
+  } catch {
+    proposed = (await providers.wren.generate({ systemPrompt: roster.wren.systemPrompt, userPrompt: prompt + "\nImage input was unavailable; use page structure only." })).text;
+  }
+  const scenarios = parseScenarios(proposed);
+  if (scenarios.length) await runBrowserSteps(state, info, scenarios);
+  else { info.browserResults ??= []; info.browserResults.push({ step: "Agent scenarios", status: "missing", detail: "Wren did not provide valid browser steps for this run." }); }
+  const results = info.browserResults ?? [];
+  const verdictPrompt = `Goal: ${state.goal}\nPage structure:\n${capture.structure}\nBrowser results:\n${JSON.stringify(results)}\nGive a verdict beginning PASS: or ISSUES:. If visual evidence is essential and unavailable, begin NEEDS_VISION: instead. Explain visible problems, failed browser steps, and limitations. ${visualVerified ? "You received the screenshot." : "Screenshot review was unavailable; do not claim visual verification."}`;
+  let verdict: string;
+  try { verdict = (await providers.wren.generate({ systemPrompt: roster.wren.systemPrompt, userPrompt: verdictPrompt, images: visualVerified && images ? [{ mimeType: "image/png", data: images }] : undefined })).text; }
+  catch { visualVerified = false; verdict = (await providers.wren.generate({ systemPrompt: roster.wren.systemPrompt, userPrompt: verdictPrompt + "\nUse text only." })).text; }
+  info.visualReview = verdict;
+  info.visualVerified = visualVerified;
+  state.preview = { ...state.preview, ...info };
+  await recordRunEvent(state, "wren", "visual-review", verdict, { summary: `Reviewed the staged interface: ${verdict.slice(0, 90)}` });
+  await saveState(state);
+  return /^PASS:/i.test(verdict.trim()) && !results.some((item) => item.status === "failed");
+}
+
+async function visualFix(state: TeamRunState, providers: TeamProviders): Promise<boolean> {
+  const staging = state.staging!;
+  const worktree = await createBranchWorktree(state.repo, `codex/wren-visual-${state.id}`, staging.branch);
+  const response = await askWithTools(state, "wren", requireToolProvider(providers.wren),
+    `Goal: ${state.goal}\nYour staged-interface review found an issue: ${state.preview?.visualReview}\nBrowser results: ${JSON.stringify(state.preview?.browserResults)}\nThis is the only visual fix pass. Inspect and patch the relevant code in this worktree.`, new WorkspaceTools(worktree.path, "lead"));
+  const changes = await diff(worktree.path);
+  if (!changes || /^NEEDS_INPUT:/i.test(response)) return false;
+  const checks = await runChecks(worktree.path);
+  const pseudoTask: TeamTask = { id: "visual-fix", title: "Fix staged interface", worker: "wren", dependsOn: [] };
+  const { review, qa } = await evaluateTask(state, pseudoTask, worktree.path, changes, checks, providers, await readLibrary(state));
+  if (needsRepair(review, qa, checks)) { state.preview!.issue = `Visual fix did not pass checks/review: ${review} ${qa}`; return false; }
+  await git(worktree.path, ["add", "-A"]);
+  await git(worktree.path, ["-c", "user.name=Agent Team Wren", "-c", "user.email=agent-team@localhost.invalid", "commit", "-m", "Wren: visual preview fix"]);
+  await git(staging.path, ["merge", "--ff-only", worktree.branch]);
+  await recordRunEvent(state, "wren", "visual-fix", changes.slice(0, 1_000), { summary: "Applied the one staged-interface fix pass" });
+  return true;
+}
+
+async function finishRun(state: TeamRunState, providers: TeamProviders, library: string): Promise<TeamRunState> {
+  if (await isWebProject(state.staging!.path) && state.preview?.status !== "healthy") {
+    state.status = "doing"; await saveState(state);
+    const info = await obtainPreview(state, providers.piper);
+    if (!info) return state;
+  }
+  if (state.preview?.status === "healthy" && !state.preview.visualReview) {
+    let pass: boolean;
+    try { pass = await visualReview(state, providers, state.preview); }
+    catch (error) { state.preview.issue = `Piper's browser capture could not run: ${error instanceof Error ? error.message : String(error)}`; state.status = "blocked"; await saveState(state); return state; }
+    if (/^NEEDS_VISION:/i.test(state.preview.visualReview ?? "")) {
+      state.preview.issue = "Piper asks you to choose a vision-capable model at Wren's desk, then resume the Test Bench.";
+      state.status = "blocked"; await saveState(state); return state;
+    }
+    if (!pass && !state.preview.visualFixAttempted) {
+      state.preview.visualFixAttempted = true;
+      await saveState(state);
+      if (await visualFix(state, providers)) {
+        await stopPreview(state.id);
+        state.preview.status = "stopped";
+        state.preview.visualReview = undefined;
+        const fresh = await obtainPreview(state, providers.piper);
+        if (!fresh) return state;
+        pass = await visualReview(state, providers, fresh);
+      }
+    }
+    if (!pass) { state.preview.issue ??= "The staged interface still needs attention after one visual fix pass."; state.status = "blocked"; await saveState(state); return state; }
+  }
+  if (state.preview?.visualReview && (!/^PASS:/i.test(state.preview.visualReview.trim()) || state.preview.browserResults?.some((item) => item.status === "failed"))) {
+    state.status = "blocked";
+    state.preview.issue ??= "The staged interface still needs attention after one visual fix pass.";
+    await saveState(state);
+    return state;
+  }
+  {
     const taskSummary = state.tasks.map((item) => `${item.id}: ${item.status}; checks: ${item.checks?.map((check) => `${check.name} ${check.status}`).join(", ")}; review: ${item.review ?? "none"}; QA: ${item.qa ?? "none"}`).join("\n");
     const finalDiff = await git(state.staging!.path, ["diff", "--no-ext-diff", `${state.baseCommit}..HEAD`, "--", "."]);
     state.summary = (await providers.marlow.generate({
       systemPrompt: `${roster.marlow.systemPrompt}\n${await personaContext(state.repo, "marlow")}`,
-      userPrompt: `Summarize the completed goal and what the user should review before merging. Goal: ${state.goal}\nPlan: ${JSON.stringify(state.plan)}\nTasks:\n${taskSummary}\nFinal diff:\n${finalDiff.slice(0, 24_000)}`,
+      userPrompt: `Summarize the completed goal and what the user should review before merging. Goal: ${state.goal}\nPlan: ${JSON.stringify(state.plan)}\nTasks:\n${taskSummary}\nPreview: ${JSON.stringify(state.preview ? { status: state.preview.status, browserResults: state.preview.browserResults, visualReview: state.preview.visualReview, visualVerified: state.preview.visualVerified } : "not applicable")}\nFinal diff:\n${finalDiff.slice(0, 24_000)}`,
     })).text;
     state.memoryNote = (await providers.tove.generate({
       systemPrompt: `${roster.tove.systemPrompt}\n${await personaContext(state.repo, "tove")}`,
@@ -251,6 +431,28 @@ export async function answerTeamRun(runDir: string, answer: string, injectedProv
   await saveState(state);
   const library = await readLibrary(state);
   return advanceRun(state, injectedProviders ?? await defaultProviders(repo), `${library || "(empty)"}\n\nCurrent plan:\n${JSON.stringify(state.plan)}`, answer.trim());
+}
+
+export async function resumeTeamPreview(runDir: string, approvedCommand?: string, injectedProviders?: TeamProviders): Promise<TeamRunState> {
+  const state = await loadState(runDir);
+  if (!state.staging || !state.plan || !state.tasks.every((task) => task.status === "done")) throw new Error("Run is not ready for a preview.");
+  const repo = state.repo;
+  if (approvedCommand) {
+    if (state.preview?.command !== approvedCommand || state.preview.status !== "waiting-approval") throw new Error("This command is not awaiting approval.");
+    state.preview.approvedKeys = [...new Set([...(state.preview.approvedKeys ?? []), state.preview.commandKey!])];
+  }
+  if (/^NEEDS_VISION:/i.test(state.preview?.visualReview ?? "")) { state.preview!.visualReview = undefined; state.preview!.issue = undefined; }
+  state.status = "doing";
+  await saveState(state);
+  return finishRun(state, injectedProviders ?? await defaultProviders(repo), await readLibrary(state));
+}
+
+export async function startTeamPreview(runDir: string, injectedProviders?: TeamProviders): Promise<TeamRunState> {
+  const state = await loadState(runDir);
+  if (!state.staging || !["awaiting-review", "blocked"].includes(state.status)) throw new Error("This run has no staged preview to start.");
+  await obtainPreview(state, (injectedProviders ?? await defaultProviders(state.repo)).piper);
+  await saveState(state);
+  return state;
 }
 
 export async function messageTeamPersona(runDir: string, persona: PersonaId, message: string, injectedProvider?: ToolCapableProvider): Promise<string> {

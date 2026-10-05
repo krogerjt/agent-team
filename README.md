@@ -1,6 +1,6 @@
 # Agent Team
 
-A portable TypeScript agent team. The original text pipeline uses Researcher, Reviewer, and Lead. The coding workflow can also run a six-person team, with each persona choosing its own model provider through local configuration.
+A portable TypeScript agent team. The original text pipeline uses Researcher, Reviewer, and Lead. The coding workflow can also run a seven-person team, with each persona choosing its own model provider through local configuration.
 
 ## Quick start
 
@@ -48,7 +48,7 @@ Automatic checks include Node `test` and `typecheck` scripts, one root .NET solu
 
 The runner removes credential-like environment variables, including API keys, before starting repository checks. Checks are still code supplied by the selected repository, so choose repositories you trust.
 
-## Six-person team
+## Seven-person team
 
 | Persona | Responsibility |
 | --- | --- |
@@ -58,6 +58,7 @@ The runner removes credential-like environment variables, including API keys, be
 | Wren | Implement interface tasks |
 | Rowan | Refactor assigned code and review other workers |
 | Tove | Check task acceptance and prepare shared project memory |
+| Piper | Set up and repair the local web preview cookbook |
 
 Start a goal with:
 
@@ -96,7 +97,7 @@ npm run team -- ask --run "<run-directory>" --persona juniper --message "Which f
 npm run team -- library --repo C:\path\to\your\repo
 ```
 
-`MARLOW_*`, `JUNIPER_*`, `KIT_*`, `WREN_*`, `ROWAN_*`, and `TOVE_*` in `.env` can select providers and models individually. If omitted, they inherit the existing Lead, Researcher, and Reviewer settings shown in `.env.example`. Team tasks currently run in dependency order.
+`MARLOW_*`, `JUNIPER_*`, `KIT_*`, `WREN_*`, `ROWAN_*`, `TOVE_*`, and `PIPER_*` in `.env` can select providers and models individually. If omitted, they inherit the existing Lead, Researcher, and Reviewer settings shown in `.env.example`. Team tasks currently run in dependency order.
 
 # Workshop UI
 
@@ -106,9 +107,17 @@ Start the local workshop for this repository:
 npm run ui -- .
 ```
 
-Open the address printed by the server (by default `http://127.0.0.1:4173`). The workshop shows six block-style agent desks, the goal/task wall, activity, review, and an answer box when a task needs your input. Click an agent to chat, edit their personal traits and pinned memory, inspect their work journal, or choose their provider and model. The app keeps profiles and chats locally under `~/.agent-team/repos/<repository>/personas/`; API keys remain in `.env`. Model changes apply to the next goal or chat. The UI binds to your own computer only.
+Open the address printed by the server (by default `http://127.0.0.1:4173`). The workshop shows seven block-style agent desks, the goal/task wall, activity, review, and an answer box when a task needs your input. Click an agent to chat, edit their personal traits and pinned memory, inspect their work journal, or choose their provider and model. The app keeps profiles and chats locally under `~/.agent-team/repos/<repository>/personas/`; API keys remain in `.env`. Model changes apply to the next goal or chat. The UI binds to your own computer only.
 
 The browser needs the UI server running. A new goal still requires a clean committed checkout. A run can be merged locally from the review screen only while the original checkout is at the commit where that run started.
+
+## Local Test Bench
+
+For a web repository, Piper reads the staged code and saves an environment cookbook outside Git at `~/.agent-team/repos/<repository>/environment-cookbook.json`. The cookbook contains setup, build, and start commands, a local health path, and variable mappings. Piper may revise it four times after startup failures. Piper cannot edit application code. The host runs cookbook commands in the staging worktree, shows risky commands for your decision, and reports a code diagnosis if setup still fails. A missing secret appears as a prompt from Piper.
+
+Open **Test Bench** in the workshop to see the live staged app, Piper's log and cookbook, the latest screenshot, browser steps, and Wren's review. Wren receives a screenshot when their selected model accepts images; otherwise the review says that visual verification was unavailable. Wren or the relevant worker gets one focused code fix pass for an interface issue, followed by another check and preview. Switching runs or pressing **Stop preview** ends the preview process tree. Only the selected run remains live.
+
+The **Shared secret shelf** stores named values locally using Windows user-scoped encryption. The cookbook maps app variable names to those secret names; Piper receives names and redacted command output, never vault values. Preview processes receive only an explicit set of basic operating-system variables and cookbook variables. Wren receives a page screenshot and page text, so avoid showing sensitive data in the previewed interface. The local worktree separates source changes, but commands run with your Windows account's permissions. Use the Test Bench with repositories you trust. Edge or Chrome must be installed for browser capture and scenarios; the app checks Edge first.
 
 ## Searchable agent timelines
 
