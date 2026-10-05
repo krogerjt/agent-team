@@ -50,9 +50,10 @@ export async function detectChecks(root: string): Promise<CheckCommand[]> {
 export async function executeCheck(root: string, command: CheckCommand, timeoutMs = 120_000): Promise<CheckResult> {
   return new Promise((resolve) => {
     const windowsNpm = process.platform === "win32" && command.executable === "npm";
-    const child = spawn(windowsNpm ? "npm.cmd" : command.executable, command.args, {
+    const executable = windowsNpm ? "cmd.exe" : command.executable;
+    const args = windowsNpm ? ["/d", "/s", "/c", `npm.cmd ${command.args.join(" ")}`] : command.args;
+    const child = spawn(executable, args, {
       cwd: root,
-      shell: windowsNpm,
       windowsHide: true,
       env: { ...process.env, CI: "1" },
     });
