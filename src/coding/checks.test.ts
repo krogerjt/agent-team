@@ -3,7 +3,7 @@ import { after, test } from "node:test";
 import { rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { detectChecks } from "./checks.js";
+import { checkEnvironment, detectChecks } from "./checks.js";
 import { tempRepo } from "./test-helpers.js";
 
 const cleanup: string[] = [];
@@ -21,4 +21,8 @@ test("detects Node, .NET, and Python checks without model commands", async () =>
   await writeFile(path.join(root, "service.sln"), "");
   await writeFile(path.join(root, "pyproject.toml"), "[tool.pytest.ini_options]\n");
   assert.deepEqual((await detectChecks(root)).map((check) => check.name), ["npm test", "npm run typecheck", "dotnet test", "python -m pytest"]);
+});
+
+test("does not pass API credentials to repository checks", () => {
+  assert.deepEqual(checkEnvironment({ PATH: "bin", OPENAI_API_KEY: "private", ANTHROPIC_API_KEY: "private", AWS_SECRET_ACCESS_KEY: "private" }), { CI: "1", PATH: "bin" });
 });

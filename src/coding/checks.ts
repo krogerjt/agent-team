@@ -16,6 +16,14 @@ interface CheckCommand {
   args: string[];
 }
 
+export function checkEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = { CI: "1" };
+  for (const [name, value] of Object.entries(source)) {
+    if (!/(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|COOKIE)/i.test(name)) environment[name] = value;
+  }
+  return environment;
+}
+
 async function exists(file: string): Promise<boolean> {
   try { await access(file); return true; } catch { return false; }
 }
@@ -55,7 +63,7 @@ export async function executeCheck(root: string, command: CheckCommand, timeoutM
     const child = spawn(executable, args, {
       cwd: root,
       windowsHide: true,
-      env: { ...process.env, CI: "1" },
+      env: checkEnvironment(process.env),
     });
     let output = "";
     let ended = false;

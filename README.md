@@ -45,3 +45,5 @@ npm run code -- --repo C:\path\to\your\repo --task "Make a small, specific code 
 The coding command requires a clean Git repository with a commit. It creates a sibling worktree on a `codex/` branch, lets Researcher inspect, Lead patch, and Reviewer assess the diff and checks. It leaves the worktree and its uncommitted changes in place for you to inspect. The command never commits, pushes, or deletes the worktree.
 
 Automatic checks include Node `test` and `typecheck` scripts, one root .NET solution or project, and Python pytest or unittest discovery. For Node repositories with a lockfile, the runner uses `npm ci --ignore-scripts` in the worktree before checks. A missing tool or undetected check is reported, not counted as a pass. Model tool use is limited to repository file listing, reading, literal search, and exact text patches; it cannot ask the runner to execute arbitrary commands.
+
+The runner removes credential-like environment variables, including API keys, before starting repository checks. Checks are still code supplied by the selected repository, so choose repositories you trust.
