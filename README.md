@@ -96,4 +96,16 @@ npm run team -- ask --run "<run-directory>" --persona juniper --message "Which f
 npm run team -- library --repo C:\path\to\your\repo
 ```
 
-`MARLOW_*`, `JUNIPER_*`, `KIT_*`, `WREN_*`, `ROWAN_*`, and `TOVE_*` in `.env` can select providers and models individually. If omitted, they inherit the existing Lead, Researcher, and Reviewer settings shown in `.env.example`. The team backend is a sequential CLI workflow; an interactive console, live monitors, and visual review screen are future interface work.
+`MARLOW_*`, `JUNIPER_*`, `KIT_*`, `WREN_*`, `ROWAN_*`, and `TOVE_*` in `.env` can select providers and models individually. If omitted, they inherit the existing Lead, Researcher, and Reviewer settings shown in `.env.example`. Team tasks currently run in dependency order.
+
+# Workshop UI
+
+Start the local workshop for this repository:
+
+```sh
+npm run ui -- .
+```
+
+Open the address printed by the server (by default `http://127.0.0.1:4173`). The workshop shows six block-style agent desks, the goal/task wall, activity, review, and an answer box when a task needs your input. Click an agent to chat, edit their personal traits and pinned memory, inspect their work journal, or choose their provider and model. The app keeps profiles and chats locally under `~/.agent-team/repos/<repository>/personas/`; API keys remain in `.env`. Model changes apply to the next goal or chat. The UI binds to your own computer only.
+
+The browser needs the UI server running. A new goal still requires a clean committed checkout. A run can be merged locally from the review screen only while the original checkout is at the commit where that run started.

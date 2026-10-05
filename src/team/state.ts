@@ -38,7 +38,7 @@ export interface TeamRunState {
 
 export function repoHome(repo: string): string {
   const hash = createHash("sha256").update(path.resolve(repo).toLowerCase()).digest("hex").slice(0, 12);
-  return path.join(os.homedir(), ".agent-team", "repos", `${path.basename(repo)}-${hash}`);
+  return path.join(process.env.AGENT_TEAM_DATA_DIR ? path.resolve(process.env.AGENT_TEAM_DATA_DIR) : path.join(os.homedir(), ".agent-team"), "repos", `${path.basename(repo)}-${hash}`);
 }
 
 export async function createRunState(repo: string, goal: string, baseCommit: string): Promise<TeamRunState> {
@@ -65,7 +65,7 @@ export async function loadState(runDir: string): Promise<TeamRunState> {
   return JSON.parse(await readFile(path.join(path.resolve(runDir), "state.json"), "utf8")) as TeamRunState;
 }
 
-export async function readLibrary(state: TeamRunState): Promise<string> {
+export async function readLibrary(state: Pick<TeamRunState, "libraryPath">): Promise<string> {
   try { return (await readFile(state.libraryPath, "utf8")).slice(-40_000); }
   catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return "";
