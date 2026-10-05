@@ -6,7 +6,8 @@ import { WorkspaceTools } from "../coding/workspace-tools.js";
 import { roster, type PersonaId, type WorkerId } from "../personas/roster.js";
 import { orderedTasks, parsePlan, type TeamTask } from "./plan.js";
 import { appendLibrary, createRunState, loadState, logEvent, readLibrary, repoHome, saveState, type TaskState, type TeamRunState } from "./state.js";
-import { appendActivity, appendChat, configuredProvider, personaContext, readPersona } from "./persona-store.js";
+import { appendChat, configuredProvider, personaContext, readPersona } from "./persona-store.js";
+import { appendTimeline, ensureTimeline, executeMemoryTool, memoryTools } from "./timeline.js";
 
 export type TeamProviders = Record<PersonaId, ModelProvider>;
 
@@ -19,25 +20,52 @@ function checksText(checks: CheckResult[]): string {
   return checks.map((check) => `${check.name}: ${check.status}\n${check.output.slice(-3_000)}`).join("\n\n");
 }
 
+async function recordRunEvent(
+  state: TeamRunState, persona: PersonaId, event: string, detail: string,
+  options: { summary?: string; taskId?: string; files?: string[] } = {},
+): Promise<void> {
+  await ensureTimeline(state.repo);
+  const task = options.taskId
+    ? state.plan?.tasks.find((item) => item.id === options.taskId)
+    : state.plan?.tasks.find((item) => state.tasks.some((status) => status.id === item.id && (status.status === "doing" || status.status === "review")));
+  await logEvent(state, persona, event, detail);
+  await appendTimeline(state.repo, persona, {
+    at: new Date().toISOString(), event,
+    summary: options.summary ?? `${roster[persona].name} ${event}: ${detail}`,
+    detail, feature: task?.title ?? state.goal,
+    files: options.files ?? [], runId: state.id, taskId: task?.id, source: "run",
+  });
+}
+
 async function askWithTools(
   state: TeamRunState, persona: PersonaId, provider: ToolCapableProvider,
-  prompt: string, tools: WorkspaceTools,
+  prompt: string, tools: WorkspaceTools, journalWork = true,
 ): Promise<string> {
-  await logEvent(state, persona, "started", prompt.slice(0, 300));
   const personal = await personaContext(state.repo, persona);
+  const activeTitle = state.plan?.tasks.find((task) => state.tasks.some((item) => item.id === task.id && (item.status === "doing" || item.status === "review")))?.title ?? state.goal;
+  if (journalWork) await recordRunEvent(state, persona, "started", prompt.slice(0, 300), { summary: `${roster[persona].name} started ${activeTitle}` });
+  else await logEvent(state, persona, "started", prompt.slice(0, 300));
   const response = await provider.generateWithTools({
     systemPrompt: `${roster[persona].systemPrompt}\n${personal}`,
     userPrompt: prompt,
-    tools: tools.definitions,
+    tools: [...tools.definitions, ...memoryTools],
     execute: async (name, args) => {
-      await logEvent(state, persona, "tool", `${name} ${JSON.stringify(args).slice(0, 300)}`);
+      if (name === "search_memory" || name === "get_memory_entry") {
+        await logEvent(state, persona, "memory-lookup", `${name} ${JSON.stringify(args).slice(0, 300)}`);
+        return executeMemoryTool(state.repo, persona, name, args);
+      }
+      if (journalWork) await recordRunEvent(state, persona, "tool", `${name} ${JSON.stringify(args).slice(0, 300)}`, {
+        summary: `${roster[persona].name} used ${name}${typeof args.path === "string" ? ` on ${args.path}` : ""}`,
+        files: typeof args.path === "string" ? [args.path] : [],
+      });
+      else await logEvent(state, persona, "tool", `${name} ${JSON.stringify(args).slice(0, 300)}`);
       return tools.execute(name, args);
     },
     maxToolCalls: 20,
     maxRounds: 12,
   });
-  await logEvent(state, persona, "finished", `tool calls: ${response.toolCalls}; ${response.text.slice(0, 300)}`);
-  await appendActivity(state.repo, persona, { at: new Date().toISOString(), runId: state.id, event: "worked", detail: `${prompt.slice(0, 180)} → ${response.text.slice(0, 220)}` });
+  if (journalWork) await recordRunEvent(state, persona, "finished", `tool calls: ${response.toolCalls}; ${response.text.slice(0, 1_500)}`, { summary: `${roster[persona].name} finished ${activeTitle}` });
+  else await logEvent(state, persona, "finished", `tool calls: ${response.toolCalls}; ${response.text.slice(0, 300)}`);
   if (!response.text.trim()) throw new Error(`${roster[persona].name} returned an empty response.`);
   return response.text.trim();
 }
@@ -75,7 +103,7 @@ async function executeTask(
     const branch = `codex/${task.worker}-${state.id}-${task.id}`;
     worktree = await createBranchWorktree(state.repo, branch, staging.branch);
     taskState.worktree = worktree;
-    await logEvent(state, task.worker, "worktree", worktree.path);
+    await recordRunEvent(state, task.worker, "worktree", worktree.path, { taskId: task.id, summary: `Opened a worktree for ${task.title}` });
     await saveState(state);
   }
 
@@ -98,12 +126,12 @@ async function executeTask(
   let checks = await runChecks(worktree.path);
   taskState.status = "review";
   taskState.checks = checks;
-  await logEvent(state, "host", "checks", checks.map((check) => `${check.name}: ${check.status}`).join(", "));
+  await recordRunEvent(state, task.worker, "checks", checksText(checks), { taskId: task.id, summary: `Checked ${task.title}: ${checks.map((check) => `${check.name} ${check.status}`).join(", ")}` });
   await saveState(state);
   let { review, qa } = await evaluateTask(state, task, worktree.path, changes, checks, providers, library);
 
   if (needsRepair(review, qa, checks)) {
-    await logEvent(state, task.worker, "repair", `${review.slice(0, 200)} | ${qa.slice(0, 200)}`);
+    await recordRunEvent(state, task.worker, "repair", `${review.slice(0, 500)} | ${qa.slice(0, 500)}`, { taskId: task.id, summary: `Repairing ${task.title} after review` });
     await askWithTools(state, task.worker, worker,
       `This is the single repair pass for task ${task.title}. Address the review and QA findings with focused patches.\nReview:\n${review}\nQA:\n${qa}\nChecks:\n${checksText(checks)}\nDiff:\n${changes.slice(0, 24_000)}`, tools);
     changes = await diff(worktree.path);
@@ -129,8 +157,7 @@ async function executeTask(
   ]);
   await git(staging.path, ["merge", "--ff-only", worktree.branch]);
   taskState.status = "done";
-  await logEvent(state, task.worker, "integrated", staging.branch);
-  await appendActivity(state.repo, task.worker, { at: new Date().toISOString(), runId: state.id, event: "completed task", detail: `${task.title}; checks: ${checks.map((check) => `${check.name} ${check.status}`).join(", ") || "none"}` });
+  await recordRunEvent(state, task.worker, "integrated", `${staging.branch}; checks: ${checks.map((check) => `${check.name} ${check.status}`).join(", ") || "none"}`, { taskId: task.id, summary: `Completed ${task.title}` });
   await saveState(state);
   return true;
 }
@@ -151,7 +178,7 @@ async function advanceRun(state: TeamRunState, providers: TeamProviders, library
       taskState.status = "blocked";
       taskState.error = error instanceof Error ? error.message : String(error);
       state.status = "blocked";
-      await logEvent(state, task.worker, "error", taskState.error);
+      await recordRunEvent(state, task.worker, "error", taskState.error, { taskId: task.id, summary: `Blocked on ${task.title}` });
       break;
     }
   }
@@ -195,7 +222,7 @@ export async function runTeamGoal(repoPath: string, goal: string, injectedProvid
     }
     state.tasks = state.plan.tasks.map((task) => ({ id: task.id, status: "todo" }));
     await saveState(state);
-    await logEvent(state, "marlow", "plan", JSON.stringify(state.plan));
+    await recordRunEvent(state, "marlow", "plan", JSON.stringify(state.plan), { summary: `Planned ${goal}` });
 
     state.staging = await createBranchWorktree(repo, `codex/team-${state.id}`, baseCommit);
     const sharedContext = `${library || "(empty)"}\n\nCurrent plan:\n${JSON.stringify(state.plan)}`;
@@ -219,6 +246,8 @@ export async function answerTeamRun(runDir: string, answer: string, injectedProv
   state.decisions ??= [];
   state.decisions.push({ taskId: blocked.id, answer: answer.trim(), at: new Date().toISOString() });
   await logEvent(state, "user", "answer", `${blocked.id}: ${answer}`);
+  const worker = state.plan.tasks.find((task) => task.id === blocked.id)?.worker;
+  if (worker) await recordRunEvent(state, worker, "received-answer", answer, { taskId: blocked.id, summary: `Received guidance for ${state.plan.tasks.find((task) => task.id === blocked.id)?.title ?? blocked.id}` });
   await saveState(state);
   const library = await readLibrary(state);
   return advanceRun(state, injectedProviders ?? await defaultProviders(repo), `${library || "(empty)"}\n\nCurrent plan:\n${JSON.stringify(state.plan)}`, answer.trim());
@@ -233,8 +262,9 @@ export async function messageTeamPersona(runDir: string, persona: PersonaId, mes
   await appendChat(state.repo, persona, { at: new Date().toISOString(), role: "user", text: message, runId: state.id });
   const reply = await askWithTools(state, persona, requireToolProvider(injectedProvider ?? await configuredProvider(state.repo, persona)),
     `Recent conversation:\n${history || "(none)"}\nUser message to ${roster[persona].name}: ${message}\nGoal: ${state.goal}\nCurrent plan: ${JSON.stringify(state.plan ?? null)}\nTask wall: ${JSON.stringify(state.tasks.map((task) => ({ id: task.id, status: task.status })))}\nShared library:\n${library || "(empty)"}\nRespond to the user. You may inspect files, but this direct message cannot edit code.`,
-    new WorkspaceTools(workspace, "researcher"));
+    new WorkspaceTools(workspace, "researcher"), false);
   await appendChat(state.repo, persona, { at: new Date().toISOString(), role: "assistant", text: reply, runId: state.id });
+  await appendTimeline(state.repo, persona, { at: new Date().toISOString(), event: "conversation", summary: `Discussed: ${message}`, detail: `User: ${message.slice(0, 1_000)}\nAgent: ${reply.slice(0, 900)}`, feature: state.goal, files: [], runId: state.id, source: "chat" });
   return reply;
 }
 
@@ -250,15 +280,17 @@ export async function chatTeamPersona(repo: string, persona: PersonaId, message:
   const response = await provider.generateWithTools({
     systemPrompt: `${roster[persona].systemPrompt}\n${personal}`,
     userPrompt: `Recent conversation:\n${history || "(none)"}\nShared repository library:\n${library || "(empty)"}\nUser: ${message}\nReply as ${roster[persona].name}. You may inspect the repository, but do not edit files.`,
-    tools: tools.definitions,
-    execute: (name, args) => tools.execute(name, args),
+    tools: [...tools.definitions, ...memoryTools],
+    execute: (name, args) => name === "search_memory" || name === "get_memory_entry"
+      ? executeMemoryTool(repo, persona, name, args)
+      : tools.execute(name, args),
     maxToolCalls: 12,
     maxRounds: 8,
   });
   const reply = response.text.trim();
   if (!reply) throw new Error(`${roster[persona].name} returned an empty response.`);
   await appendChat(repo, persona, { at: new Date().toISOString(), role: "assistant", text: reply });
-  await appendActivity(repo, persona, { at: new Date().toISOString(), runId: "chat", event: "conversation", detail: message.slice(0, 220) });
+  await appendTimeline(repo, persona, { at: new Date().toISOString(), event: "conversation", summary: `Discussed: ${message}`, detail: `User: ${message.slice(0, 1_000)}\nAgent: ${reply.slice(0, 900)}`, feature: undefined, files: [], source: "chat" });
   return reply;
 }
 

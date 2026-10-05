@@ -4,6 +4,7 @@ import { createProvider, resolveProviderConfig, type ProviderName } from "../con
 import type { ModelProvider } from "../core/provider.js";
 import { roster, type PersonaId } from "../personas/roster.js";
 import { repoHome } from "./state.js";
+import { searchTimeline } from "./timeline.js";
 
 export interface PersonaActivity { at: string; runId: string; event: string; detail: string }
 export interface PersonaChat { at: string; role: "user" | "assistant"; text: string; runId?: string }
@@ -102,8 +103,8 @@ export async function appendChat(repo: string, id: PersonaId, item: PersonaChat)
 
 export async function personaContext(repo: string, id: PersonaId): Promise<string> {
   const profile = await readPersona(repo, id);
-  const recent = profile.activity.slice(0, 8).map((item) => `${item.at}: ${item.event} — ${item.detail}`).join("\n");
-  return `Personal traits: ${profile.traits}\nPersonal memory: ${profile.memory || "(empty)"}\nRecent work:\n${recent || "(none yet)"}`;
+  const recent = (await searchTimeline(repo, id, { limit: 5 })).entries.map((item) => `${item.at}: ${item.summary}`).join("\n");
+  return `Personal traits: ${profile.traits}\nPinned memory: ${profile.memory || "(empty)"}\nRecent timeline:\n${recent || "(none yet)"}\nFor questions about previous work, features, files, or dates, use search_memory and get_memory_entry before answering. Distinguish recorded actions from verified results.`;
 }
 
 export async function configuredProvider(repo: string, id: PersonaId): Promise<ModelProvider> {

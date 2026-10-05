@@ -109,3 +109,15 @@ npm run ui -- .
 Open the address printed by the server (by default `http://127.0.0.1:4173`). The workshop shows six block-style agent desks, the goal/task wall, activity, review, and an answer box when a task needs your input. Click an agent to chat, edit their personal traits and pinned memory, inspect their work journal, or choose their provider and model. The app keeps profiles and chats locally under `~/.agent-team/repos/<repository>/personas/`; API keys remain in `.env`. Model changes apply to the next goal or chat. The UI binds to your own computer only.
 
 The browser needs the UI server running. A new goal still requires a clean committed checkout. A run can be merged locally from the review screen only while the original checkout is at the commit where that run started.
+
+## Searchable agent timelines
+
+Each agent has an append-only personal timeline under `~/.agent-team/repos/<repository>/personas/<agent>/timeline/YYYY-MM.jsonl`. Each line has an ISO timestamp, event type, one-line summary, feature or task, affected files when known, run and task IDs, and a bounded detail. Existing run logs and older personal activity are imported on first use. These plain-text files can be searched directly with `rg`, and the workshop Journal tab has word, date, feature, and file filters.
+
+Agents have `search_memory` and `get_memory_entry` tools. When asked about past work by feature, file, or date, they search their own timeline and read only the matching detail instead of loading an entire history into their prompt. Pinned personal memory and the shared library remain separate from this event record.
+
+To search from the terminal:
+
+```powershell
+npm run team -- timeline --repo . --persona wren --query "checkout" --from 2025-01-01
+```

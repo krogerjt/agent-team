@@ -9,6 +9,7 @@ import { roster, type PersonaId } from "../personas/roster.js";
 import { effectiveModel, isPersonaId, readPersona, updatePersona } from "../team/persona-store.js";
 import { loadState, readLibrary, repoHome, type TeamRunState } from "../team/state.js";
 import { answerTeamRun, chatTeamPersona, mergeTeamRun, messageTeamPersona, reviewTeamRun, runTeamGoal } from "../team/workflow.js";
+import { getTimelineEntry, searchTimeline } from "../team/timeline.js";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const repoArg = process.argv[2] ?? ".";
@@ -84,6 +85,26 @@ async function serve(req: IncomingMessage, res: ServerResponse, repo: string): P
   }
   if (method === "GET" && url.pathname.startsWith("/api/jobs/")) {
     json(res, 200, jobs.get(url.pathname.slice(10)) ?? { status: "error", error: "Job not found." });
+    return;
+  }
+  const timelineMatch = /^\/api\/personas\/([^/]+)\/timeline(?:\/([^/]+))?$/.exec(url.pathname);
+  if (method === "GET" && timelineMatch) {
+    const id = timelineMatch[1];
+    if (!isPersonaId(id)) throw new Error("Unknown agent.");
+    if (timelineMatch[2]) {
+      const entry = await getTimelineEntry(repo, id, timelineMatch[2]);
+      json(res, entry ? 200 : 404, entry ?? { error: "Timeline entry not found." });
+    } else {
+      const limit = url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : undefined;
+      json(res, 200, await searchTimeline(repo, id, {
+        query: url.searchParams.get("query") ?? undefined,
+        from: url.searchParams.get("from") ?? undefined,
+        to: url.searchParams.get("to") ?? undefined,
+        feature: url.searchParams.get("feature") ?? undefined,
+        file: url.searchParams.get("file") ?? undefined,
+        limit,
+      }));
+    }
     return;
   }
   const personaMatch = /^\/api\/personas\/([^/]+)(\/chat)?$/.exec(url.pathname);

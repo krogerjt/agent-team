@@ -133,9 +133,31 @@ function renderPanel() {
   const chat = item.chat || [];
   $("#detail-panel").innerHTML = `<div class="panel-head" style="--accent:${colors[item.id][0]}"><div class="panel-top"><span>PERSONAL DESK / 0${state.profiles.indexOf(item) + 1}</span><span class="panel-star">✦</span></div><div class="panel-person">${avatar(item.id, "panel-avatar")}<div><small>${escapeHtml(item.specialty)}</small><h2>${escapeHtml(item.name)}</h2><p>“${escapeHtml(moods[item.id])}”</p></div></div><div class="panel-tabs"><button class="${state.panelTab === "chat" ? "active" : ""}" data-tab="chat">Chat</button><button class="${state.panelTab === "journal" ? "active" : ""}" data-tab="journal">Journal</button><button class="${state.panelTab === "settings" ? "active" : ""}" data-tab="settings">Model</button></div></div>
     <div class="panel-body">${state.panelTab === "chat" ? `<div class="chat-window" id="chat-window">${chat.length ? chat.map((entry) => `<div class="chat-bubble ${entry.role}"><span>${entry.role === "user" ? "YOU" : escapeHtml(item.name.toUpperCase())}</span><p>${escapeHtml(entry.text)}</p><small>${fmt(entry.at)}</small></div>`).join("") : `<div class="chat-empty"><span>✳</span><h3>Pull up a chair.</h3><p>Ask ${escapeHtml(item.name)} about the repository, a goal, or what they've been working on.</p></div>`}</div><form id="chat-form" class="chat-form"><textarea name="message" rows="2" maxlength="8000" placeholder="Message ${escapeHtml(item.name)}…" required></textarea><button class="send-button" aria-label="Send message">↗</button></form><p class="panel-hint">Conversations are saved to ${escapeHtml(item.name)}'s personal desk.</p>` : ""}
-    ${state.panelTab === "journal" ? `<div class="journal-intro"><span>▤</span><h3>${escapeHtml(item.name)}'s journal</h3><p>A personal space for character, reminders, and the work they've done.</p></div><form id="journal-form"><label>PERSONALITY & TRAITS<textarea name="traits" rows="4" maxlength="4000" placeholder="How does this agent approach work?">${escapeHtml(item.traits)}</textarea></label><label>PINNED MEMORY<textarea name="memory" rows="6" maxlength="12000" placeholder="Facts or preferences this agent should carry into future work…">${escapeHtml(item.memory)}</textarea></label><button class="secondary-button" type="submit">Save journal</button></form><div class="journal-history"><h4>RECENT WORK</h4>${item.activity?.length ? item.activity.slice(0, 12).map((entry) => `<div class="journal-entry"><span>✦</span><div><strong>${escapeHtml(entry.event)}</strong><p>${escapeHtml(entry.detail)}</p><small>${fmt(entry.at)}</small></div></div>`).join("") : `<p class="subtle">No work logged yet. Their story starts with the next goal.</p>`}</div>` : ""}
+    ${state.panelTab === "journal" ? `<div class="journal-intro"><span>▤</span><h3>${escapeHtml(item.name)}'s journal</h3><p>A personal space for character, reminders, and the work they've done.</p></div><form id="journal-form"><label>PERSONALITY & TRAITS<textarea name="traits" rows="4" maxlength="4000" placeholder="How does this agent approach work?">${escapeHtml(item.traits)}</textarea></label><label>PINNED MEMORY<textarea name="memory" rows="6" maxlength="12000" placeholder="Facts or preferences this agent should carry into future work…">${escapeHtml(item.memory)}</textarea></label><button class="secondary-button" type="submit">Save journal</button></form><div class="journal-history"><h4>SEARCHABLE TIMELINE</h4><form id="timeline-form" class="timeline-form"><input name="query" maxlength="200" placeholder="Search work, features, or decisions…" aria-label="Search timeline"><div class="timeline-dates"><label>FROM<input name="from" type="date"></label><label>TO<input name="to" type="date"></label></div><details><summary>More filters</summary><input name="feature" maxlength="200" placeholder="Feature or task" aria-label="Feature filter"><input name="file" maxlength="300" placeholder="File path" aria-label="File filter"></details><button class="secondary-button" type="submit">Search journal</button></form><div id="timeline-list"><p class="subtle">Loading the timeline…</p></div></div>` : ""}
     ${state.panelTab === "settings" ? `<div class="settings-intro"><span>◈</span><h3>Choose ${escapeHtml(item.name)}'s model</h3><p>Each desk can use its own provider and model. Your API keys stay in the local .env file.</p></div><form id="model-form"><label>PROVIDER<select name="provider" id="provider-select"><option value="mock" ${effective.provider === "mock" ? "selected" : ""}>Mock · demo mode</option><option value="openai" ${effective.provider === "openai" ? "selected" : ""}>OpenAI</option><option value="anthropic" ${effective.provider === "anthropic" ? "selected" : ""}>Anthropic</option><option value="bedrock" ${effective.provider === "bedrock" ? "selected" : ""}>Amazon Bedrock</option></select></label><label>MODEL NAME<input name="model" id="model-input" list="known-models" value="${escapeHtml(effective.model || "")}" placeholder="Choose or enter a model ID" spellcheck="false"><datalist id="known-models">${[...new Set(state.profiles.filter((person) => person.effective?.provider === effective.provider).map((person) => person.effective.model).filter(Boolean))].map((model) => `<option value="${escapeHtml(model)}"></option>`).join("")}</datalist></label><p class="model-note">Choose a model already used by the team, or enter another ID supported by your account. Saved choices apply to the next goal or chat.</p><button class="secondary-button" type="submit">Save model choice</button></form><div class="setting-foot"><span class="tiny-dot"></span> Current: ${escapeHtml(effective.provider)}${effective.model ? ` / ${escapeHtml(effective.model)}` : ""}</div>` : ""}</div>`;
   const chatWindow = $("#chat-window"); if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
+  if (state.panelTab === "journal") void loadTimeline();
+}
+
+async function loadTimeline(form) {
+  const id = state.selectedAgent;
+  const params = new URLSearchParams();
+  if (form) for (const [key, value] of new FormData(form)) {
+    const text = value.toString().trim();
+    if (!text) continue;
+    if ((key === "from" || key === "to") && /^\d{4}-\d{2}-\d{2}$/.test(text)) {
+      const [year, month, day] = text.split("-").map(Number);
+      const boundary = new Date(year, month - 1, day + (key === "to" ? 1 : 0));
+      params.set(key, new Date(boundary.getTime() - (key === "to" ? 1 : 0)).toISOString());
+    } else params.set(key, text);
+  }
+  params.set("limit", "25");
+  try {
+    const result = await api(`/api/personas/${id}/timeline?${params}`);
+    if (state.selectedAgent !== id || state.panelTab !== "journal") return;
+    const node = $("#timeline-list"); if (!node) return;
+    node.innerHTML = result.entries.length ? `<p class="timeline-count">${result.total} matching event${result.total === 1 ? "" : "s"}${result.total > result.entries.length ? ` · showing ${result.entries.length}` : ""}</p>${result.entries.map((entry) => `<article class="timeline-entry"><div class="timeline-mark">✦</div><div><time>${fmt(entry.at)}</time><strong>${escapeHtml(entry.summary)}</strong>${entry.feature ? `<small>${escapeHtml(entry.feature)}</small>` : ""}${entry.files?.length ? `<small>Files: ${escapeHtml(entry.files.join(", "))}</small>` : ""}<details><summary>Details</summary><p>${escapeHtml(entry.detail)}</p>${entry.runId ? `<small>Run ${escapeHtml(entry.runId)}${entry.taskId ? ` · ${escapeHtml(entry.taskId)}` : ""}</small>` : ""}</details></div></article>`).join("")}` : `<p class="subtle">No matching events. Try another date, feature, or search term.</p>`;
+  } catch (error) { if (state.selectedAgent === id && $("#timeline-list")) $("#timeline-list").textContent = error.message; }
 }
 
 async function submitGoal(form) {
@@ -190,9 +212,10 @@ document.addEventListener("click", async (event) => {
 
 document.addEventListener("submit", async (event) => {
   const form = event.target;
-  if (!["goal-form", "answer-form", "answer-pop-form", "chat-form", "journal-form", "model-form"].includes(form.id)) return;
+  if (!["goal-form", "answer-form", "answer-pop-form", "chat-form", "journal-form", "timeline-form", "model-form"].includes(form.id)) return;
   event.preventDefault();
   if (form.id === "goal-form") return submitGoal(form);
+  if (form.id === "timeline-form") return loadTimeline(form);
   const button = form.querySelector("button[type=submit], button:not([type])"); if (button) button.disabled = true;
   try {
     if (form.id === "answer-form" || form.id === "answer-pop-form") {

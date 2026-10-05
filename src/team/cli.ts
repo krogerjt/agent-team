@@ -5,11 +5,17 @@ import { git } from "../coding/git.js";
 import { roster, type PersonaId } from "../personas/roster.js";
 import { loadState, repoHome } from "./state.js";
 import { answerTeamRun, mergeTeamRun, messageTeamPersona, reviewTeamRun, runTeamGoal } from "./workflow.js";
+import { isPersonaId } from "./persona-store.js";
+import { searchTimeline } from "./timeline.js";
 
 function value(args: string[], flag: string): string {
   const index = args.indexOf(flag);
   if (index < 0 || !args[index + 1] || args[index + 1].startsWith("--")) throw new Error(`Missing ${flag}.`);
   return args[index + 1];
+}
+
+function optional(args: string[], flag: string): string | undefined {
+  return args.includes(flag) ? value(args, flag) : undefined;
 }
 
 async function main(): Promise<void> {
@@ -52,6 +58,18 @@ async function main(): Promise<void> {
     }
     return;
   }
+  if (command === "timeline") {
+    const repo = await git(path.resolve(value(args, "--repo")), ["rev-parse", "--show-toplevel"]);
+    const persona = value(args, "--persona").toLowerCase();
+    if (!isPersonaId(persona)) throw new Error(`Unknown persona: ${persona}.`);
+    const result = await searchTimeline(repo, persona, {
+      query: optional(args, "--query"), from: optional(args, "--from"), to: optional(args, "--to"),
+      feature: optional(args, "--feature"), file: optional(args, "--file"), limit: 25,
+    });
+    console.log(`${result.total} matching events (showing ${result.entries.length}):`);
+    for (const entry of result.entries) console.log(`${entry.at} | ${entry.summary}${entry.feature ? ` | ${entry.feature}` : ""}${entry.files.length ? ` | ${entry.files.join(", ")}` : ""} | ${entry.id}`);
+    return;
+  }
   if (command === "events") {
     const state = await loadState(value(args, "--run"));
     try { console.log(await readFile(path.join(state.runDir, "events.jsonl"), "utf8")); }
@@ -83,7 +101,7 @@ async function main(): Promise<void> {
     console.log(`Merged ${state.staging?.branch} into ${state.repo}. No push was performed.`);
     return;
   }
-  throw new Error("Usage: npm run team -- run --repo <path> --goal <goal> | status|review|merge|events --run <run-directory> | answer --run <run-directory> --text <guidance> | ask --run <run-directory> --persona <name> --message <text> | library --repo <path>");
+  throw new Error("Usage: npm run team -- run --repo <path> --goal <goal> | status|review|merge|events --run <run-directory> | answer --run <run-directory> --text <guidance> | ask --run <run-directory> --persona <name> --message <text> | library --repo <path> | timeline --repo <path> --persona <name> [--query <text>] [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--feature <text>] [--file <path>]");
 }
 
 main().catch((error: unknown) => {
