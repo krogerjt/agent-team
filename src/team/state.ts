@@ -29,6 +29,7 @@ export interface TeamRunState {
   staging?: Worktree;
   plan?: TeamPlan;
   tasks: TaskState[];
+  decisions?: Array<{ taskId: string; answer: string; at: string }>;
   summary?: string;
   memoryNote?: string;
   libraryPath: string;

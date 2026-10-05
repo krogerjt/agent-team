@@ -65,27 +65,34 @@ function needsRepair(review: string, qa: string, checks: CheckResult[]): boolean
 
 async function executeTask(
   state: TeamRunState, task: TeamTask, taskState: TaskState,
-  providers: TeamProviders, library: string,
+  providers: TeamProviders, library: string, answer?: string,
 ): Promise<boolean> {
   const staging = state.staging!;
   taskState.status = "doing";
+  taskState.error = undefined;
   await saveState(state);
-  const branch = `codex/${task.worker}-${state.id}-${task.id}`;
-  const worktree = await createBranchWorktree(state.repo, branch, staging.branch);
-  taskState.worktree = worktree;
-  await logEvent(state, task.worker, "worktree", worktree.path);
-  await saveState(state);
+  let worktree = taskState.worktree;
+  if (!worktree) {
+    const branch = `codex/${task.worker}-${state.id}-${task.id}`;
+    worktree = await createBranchWorktree(state.repo, branch, staging.branch);
+    taskState.worktree = worktree;
+    await logEvent(state, task.worker, "worktree", worktree.path);
+    await saveState(state);
+  }
 
-  const research = await askWithTools(state, "juniper", requireToolProvider(providers.juniper),
-    `Goal: ${state.goal}\nAssigned task: ${task.title}\nShared library:\n${library || "(empty)"}\nInspect the relevant repository files and report a concise implementation brief for ${roster[task.worker].name}.`,
-    new WorkspaceTools(worktree.path, "researcher"));
-  taskState.research = research;
-  await saveState(state);
+  let research = taskState.research;
+  if (!research) {
+    research = await askWithTools(state, "juniper", requireToolProvider(providers.juniper),
+      `Goal: ${state.goal}\nAssigned task: ${task.title}\nShared library:\n${library || "(empty)"}\nInspect the relevant repository files and report a concise implementation brief for ${roster[task.worker].name}.`,
+      new WorkspaceTools(worktree.path, "researcher"));
+    taskState.research = research;
+    await saveState(state);
+  }
 
   const worker = requireToolProvider(providers[task.worker]);
   const tools = new WorkspaceTools(worktree.path, "lead");
   const workerResponse = await askWithTools(state, task.worker, worker,
-    `Goal: ${state.goal}\nAssigned task: ${task.title}\nOther tasks and dependencies: ${JSON.stringify(state.plan?.tasks)}\nJuniper's brief:\n${research}\nShared library:\n${library || "(empty)"}\nImplement only this task now, using apply_patch for changes.`, tools);
+    `Goal: ${state.goal}\nAssigned task: ${task.title}\nOther tasks and dependencies: ${JSON.stringify(state.plan?.tasks)}\nJuniper's brief:\n${research}\nShared library:\n${library || "(empty)"}\n${answer ? `Human answer or guidance: ${answer}\nInspect your existing worktree changes and continue this task.\n` : ""}Implement only this task now, using apply_patch for changes. If a decision is required before proceeding, begin your response with NEEDS_INPUT: and state the exact question.`, tools);
   if (/^NEEDS_INPUT:/i.test(workerResponse)) throw new Error(workerResponse);
   let changes = await diff(worktree.path);
   if (!changes) throw new Error(`${roster[task.worker].name} made no changes for ${task.id}.`);
@@ -128,6 +135,43 @@ async function executeTask(
   return true;
 }
 
+async function advanceRun(state: TeamRunState, providers: TeamProviders, library: string, answer?: string): Promise<TeamRunState> {
+  state.status = "doing";
+  await saveState(state);
+  for (const task of orderedTasks(state.plan!)) {
+    const taskState = state.tasks.find((item) => item.id === task.id)!;
+    if (taskState.status === "done") continue;
+    const taskAnswer = taskState.status === "blocked" ? answer : undefined;
+    try {
+      if (!await executeTask(state, task, taskState, providers, library, taskAnswer)) {
+        state.status = "blocked";
+        break;
+      }
+    } catch (error) {
+      taskState.status = "blocked";
+      taskState.error = error instanceof Error ? error.message : String(error);
+      state.status = "blocked";
+      await logEvent(state, task.worker, "error", taskState.error);
+      break;
+    }
+  }
+  if (state.status !== "blocked") {
+    const taskSummary = state.tasks.map((item) => `${item.id}: ${item.status}; checks: ${item.checks?.map((check) => `${check.name} ${check.status}`).join(", ")}`).join("\n");
+    state.summary = (await providers.marlow.generate({
+      systemPrompt: roster.marlow.systemPrompt,
+      userPrompt: `Summarize the completed goal and what the user should review before merging. Goal: ${state.goal}\nPlan: ${JSON.stringify(state.plan)}\nTasks:\n${taskSummary}`,
+    })).text;
+    state.memoryNote = (await providers.tove.generate({
+      systemPrompt: roster.tove.systemPrompt,
+      userPrompt: `Write concise Markdown memory for future runs. Record verified repository conventions, decisions, and remaining uncertainty only. Goal: ${state.goal}\nPlan: ${JSON.stringify(state.plan)}\nTasks:\n${taskSummary}\nHuman decisions: ${JSON.stringify(state.decisions ?? [])}\nExisting library:\n${library}`,
+    })).text;
+    state.status = "awaiting-review";
+    await logEvent(state, "host", "awaiting-review", state.staging!.path);
+  }
+  await saveState(state);
+  return state;
+}
+
 export async function runTeamGoal(repoPath: string, goal: string, injectedProviders?: TeamProviders): Promise<TeamRunState> {
   if (!goal.trim()) throw new Error("Provide a non-empty goal.");
   const repo = await resolveCleanRepo(repoPath);
@@ -153,45 +197,40 @@ export async function runTeamGoal(repoPath: string, goal: string, injectedProvid
     await logEvent(state, "marlow", "plan", JSON.stringify(state.plan));
 
     state.staging = await createBranchWorktree(repo, `codex/team-${state.id}`, baseCommit);
-    state.status = "doing";
-    await saveState(state);
     const sharedContext = `${library || "(empty)"}\n\nCurrent plan:\n${JSON.stringify(state.plan)}`;
-    for (const task of orderedTasks(state.plan)) {
-      const taskState = state.tasks.find((item) => item.id === task.id)!;
-      try {
-        if (!await executeTask(state, task, taskState, providers, sharedContext)) {
-          state.status = "blocked";
-          break;
-        }
-      } catch (error) {
-        taskState.status = "blocked";
-        taskState.error = error instanceof Error ? error.message : String(error);
-        state.status = "blocked";
-        await logEvent(state, task.worker, "error", taskState.error);
-        break;
-      }
-    }
-    if (state.status !== "blocked") {
-      const taskSummary = state.tasks.map((item) => `${item.id}: ${item.status}; checks: ${item.checks?.map((check) => `${check.name} ${check.status}`).join(", ")}`).join("\n");
-      state.summary = (await providers.marlow.generate({
-        systemPrompt: roster.marlow.systemPrompt,
-        userPrompt: `Summarize the completed goal and what the user should review before merging. Goal: ${goal}\nPlan: ${JSON.stringify(state.plan)}\nTasks:\n${taskSummary}`,
-      })).text;
-      state.memoryNote = (await providers.tove.generate({
-        systemPrompt: roster.tove.systemPrompt,
-        userPrompt: `Write concise Markdown memory for future runs. Record verified repository conventions, decisions, and remaining uncertainty only. Goal: ${goal}\nPlan: ${JSON.stringify(state.plan)}\nTasks:\n${taskSummary}\nExisting library:\n${library}`,
-      })).text;
-      state.status = "awaiting-review";
-      await logEvent(state, "host", "awaiting-review", state.staging!.path);
-    }
-    await saveState(state);
-    return state;
+    return await advanceRun(state, providers, sharedContext);
   } catch (error) {
     state.status = "blocked";
     await logEvent(state, "host", "error", error instanceof Error ? error.message : String(error));
     await saveState(state);
     throw new Error(`${error instanceof Error ? error.message : String(error)}\nRun state saved at: ${state.runDir}`);
   }
+}
+
+export async function answerTeamRun(runDir: string, answer: string, injectedProviders?: TeamProviders): Promise<TeamRunState> {
+  if (!answer.trim()) throw new Error("Provide a non-empty answer or guidance.");
+  const state = await loadState(runDir);
+  if (state.status !== "blocked" || !state.staging || !state.plan) throw new Error("Run has no resumable blocked task.");
+  const blocked = state.tasks.find((task) => task.status === "blocked");
+  if (!blocked) throw new Error("Run has no blocked task.");
+  const repo = await resolveCleanRepo(state.repo);
+  if (await git(repo, ["rev-parse", "HEAD"]) !== state.baseCommit) throw new Error("Original checkout has advanced since this run.");
+  state.decisions ??= [];
+  state.decisions.push({ taskId: blocked.id, answer: answer.trim(), at: new Date().toISOString() });
+  await logEvent(state, "user", "answer", `${blocked.id}: ${answer}`);
+  await saveState(state);
+  const library = await readLibrary(state);
+  return advanceRun(state, injectedProviders ?? defaultProviders(), `${library || "(empty)"}\n\nCurrent plan:\n${JSON.stringify(state.plan)}`, answer.trim());
+}
+
+export async function messageTeamPersona(runDir: string, persona: PersonaId, message: string, injectedProvider?: ToolCapableProvider): Promise<string> {
+  if (!message.trim()) throw new Error("Provide a non-empty message.");
+  const state = await loadState(runDir);
+  const library = await readLibrary(state);
+  const workspace = state.staging?.path ?? state.repo;
+  return askWithTools(state, persona, requireToolProvider(injectedProvider ?? createProvider(persona)),
+    `User message to ${roster[persona].name}: ${message}\nGoal: ${state.goal}\nCurrent plan: ${JSON.stringify(state.plan ?? null)}\nTask wall: ${JSON.stringify(state.tasks.map((task) => ({ id: task.id, status: task.status })))}\nShared library:\n${library || "(empty)"}\nRespond to the user. You may inspect files, but this direct message cannot edit code.`,
+    new WorkspaceTools(workspace, "researcher"));
 }
 
 export async function reviewTeamRun(runDir: string): Promise<{ state: TeamRunState; diff: string }> {

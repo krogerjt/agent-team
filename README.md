@@ -70,6 +70,7 @@ The command prints a run directory. Use it to inspect the task wall, reviewer no
 ```powershell
 npm run team -- status --run "<run-directory>"
 npm run team -- review --run "<run-directory>"
+npm run team -- events --run "<run-directory>"
 ```
 
 Marlow creates a task plan with dependencies. Tasks execute in dependency order. Each coding worker gets a separate worktree and local branch. Approved task branches advance a staging branch, while your original checkout stays at its starting commit. The run state, plan, and event log are saved under `~/.agent-team/repos/<repo>/runs/`. Tove's memory note is added to the repo's shared library only after you merge.
@@ -81,5 +82,18 @@ npm run team -- merge --run "<run-directory>"
 ```
 
 Merge requires the original checkout to be clean and still at the starting commit. It is a local fast-forward; no push occurs. A task with unresolved check, review, or QA issues remains blocked in its worktree and cannot be merged through this command. Worktrees and logs remain available for inspection.
+
+If a worker asks a question with `NEEDS_INPUT:` or a task remains blocked, inspect `status` and `review`, then provide guidance to resume that task in its existing worktree:
+
+```powershell
+npm run team -- answer --run "<run-directory>" --text "Your decision or repair guidance"
+```
+
+You can ask a named persona a read-only question about a run, or inspect shared memory directly:
+
+```powershell
+npm run team -- ask --run "<run-directory>" --persona juniper --message "Which files matter most?"
+npm run team -- library --repo C:\path\to\your\repo
+```
 
 `MARLOW_*`, `JUNIPER_*`, `KIT_*`, `WREN_*`, `ROWAN_*`, and `TOVE_*` in `.env` can select providers and models individually. If omitted, they inherit the existing Lead, Researcher, and Reviewer settings shown in `.env.example`. The team backend is a sequential CLI workflow; an interactive console, live monitors, and visual review screen are future interface work.
