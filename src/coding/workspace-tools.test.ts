@@ -26,7 +26,13 @@ test("restricts paths and applies exact text patches", async () => {
   await assert.rejects(() => reader.execute("apply_patch", { path: "note.txt", oldText: "hello", newText: "bye" }), /not available/);
   await lead.execute("apply_patch", { path: "note.txt", oldText: "hello", newText: "goodbye" });
   assert.equal(await readFile(path.join(root, "note.txt"), "utf8"), "goodbye world\n");
-  await assert.rejects(() => lead.execute("apply_patch", { path: "note.txt", oldText: "missing", newText: "x" }), /match exactly once/);
+  await assert.rejects(() => lead.execute("apply_patch", { path: "note.txt", oldText: "missing", newText: "x" }), (error: unknown) => {
+    assert.match((error as Error).message, /matched 0 times/);
+    assert.match((error as Error).message, /Submitted oldText:/);
+    assert.match((error as Error).message, /Current file context:/);
+    assert.match((error as Error).message, /goodbye world/);
+    return true;
+  });
   await lead.execute("apply_patch", { path: "new.txt", oldText: "", newText: "created\n" });
   assert.match((await reader.execute("list_files", {})).content, /new.txt/);
 });

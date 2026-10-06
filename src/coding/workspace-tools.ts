@@ -24,7 +24,7 @@ const readTools: ToolDefinition[] = [
 
 const patchTool: ToolDefinition = {
   name: "apply_patch",
-  description: "Change one file. For an existing file, oldText must be a unique exact substring and newText replaces it. To create a new file, use oldText='' and newText as the complete contents. All paths are relative to the repository.",
+  description: "Change one file. First read the current file. For an existing file, oldText must be a unique exact substring copied from that read and newText replaces it. If it fails, reread the file and rebuild oldText; never reuse a failed patch. To create a new file, use oldText='' and newText as the complete contents. All paths are relative to the repository.",
   parameters: schema({ path: { type: "string" }, oldText: { type: "string" }, newText: { type: "string" } }, ["path", "oldText", "newText"]),
 };
 
@@ -49,6 +49,13 @@ const generateImageTool: ToolDefinition = {
 function stringArg(args: Record<string, unknown>, name: string): string {
   if (typeof args[name] !== "string") throw new Error(`${name} must be a string.`);
   return args[name];
+}
+
+function patchContext(previous: string, oldText: string): string {
+  const anchor = oldText.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length >= 12);
+  const position = anchor ? previous.indexOf(anchor) : -1;
+  if (position >= 0) return previous.slice(Math.max(0, position - 2_000), Math.min(previous.length, position + 6_000));
+  return previous.slice(0, 8_000);
 }
 
 export class WorkspaceTools {
@@ -226,7 +233,16 @@ export class WorkspaceTools {
       const previous = await readFile(target.absolute, "utf8");
       if (previous.length > 100_000) throw new Error("File is too large to patch.");
       const first = previous.indexOf(oldText);
-      if (first < 0 || previous.indexOf(oldText, first + oldText.length) >= 0) throw new Error("oldText must match exactly once.");
+      const second = first >= 0 ? previous.indexOf(oldText, first + oldText.length) : -1;
+      if (first < 0 || second >= 0) {
+        const reason = first < 0 ? "matched 0 times" : "matched more than once";
+        throw new Error(
+          `Patch context for ${target.normalized} ${reason}. ` +
+          `Read the current file and copy a smaller unique oldText snippet.\n` +
+          `Submitted oldText:\n${oldText.slice(0, 2_000)}\n` +
+          `Current file context:\n${patchContext(previous, oldText)}`,
+        );
+      }
       await writeFile(target.absolute, previous.slice(0, first) + newText + previous.slice(first + oldText.length));
       return { content: `Updated ${target.normalized}` };
     }
