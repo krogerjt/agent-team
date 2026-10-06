@@ -241,7 +241,16 @@ export async function getTimelineEntry(repo: string, persona: PersonaId, id: str
 
 const params = (properties: Record<string, unknown>, required: string[]): Record<string, unknown> => ({ type: "object", properties, required, additionalProperties: false });
 export const memoryTools: ToolDefinition[] = [
-  { name: "search_memory", description: "Search your personal, dated work timeline by words, feature, file, or date. Use when asked what you did on a feature or at a time. Returns brief entries with IDs; search before making claims about past work.", parameters: params({ query: { type: "string" }, from: { type: "string", description: "UTC ISO date or timestamp" }, to: { type: "string", description: "UTC ISO date or timestamp" }, feature: { type: "string" }, file: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 20 } }, []) },
+  // OpenAI strict tools require every property to be listed in `required`.
+  // Nullable values preserve the optional-filter behavior for all providers.
+  { name: "search_memory", description: "Search your personal, dated work timeline by words, feature, file, or date. Use when asked what you did on a feature or at a time. Returns brief entries with IDs; search before making claims about past work.", parameters: params({
+    query: { type: ["string", "null"] },
+    from: { type: ["string", "null"], description: "UTC ISO date or timestamp" },
+    to: { type: ["string", "null"], description: "UTC ISO date or timestamp" },
+    feature: { type: ["string", "null"] },
+    file: { type: ["string", "null"] },
+    limit: { type: ["integer", "null"], minimum: 1, maximum: 20 },
+  }, ["query", "from", "to", "feature", "file", "limit"]) },
   { name: "get_memory_entry", description: "Read the full stored detail for one personal timeline entry returned by search_memory.", parameters: params({ id: { type: "string" } }, ["id"]) },
 ];
 
@@ -249,12 +258,12 @@ export async function executeMemoryTool(repo: string, persona: PersonaId, name: 
   if (name === "search_memory") {
     const filters: TimelineSearch = {};
     for (const key of ["query", "from", "to", "feature", "file"] as const) {
-      if (args[key] !== undefined) {
+      if (args[key] !== undefined && args[key] !== null) {
         if (typeof args[key] !== "string") throw new Error(`${key} must be text.`);
         filters[key] = args[key] as string;
       }
     }
-    if (args.limit !== undefined) {
+    if (args.limit !== undefined && args.limit !== null) {
       if (typeof args.limit !== "number") throw new Error("limit must be a number.");
       filters.limit = args.limit;
     }
