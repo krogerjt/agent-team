@@ -122,12 +122,18 @@ function blockedTaskDetails(run, task) {
   const findings = brief.findings.map((finding) => `<li><strong>${escapeHtml(finding.label)}:</strong> ${escapeHtml(finding.text)}</li>`).join("");
   return `<div class="prompt-request"><div><strong>Task</strong><span>${escapeHtml(brief.task)}</span></div><div><strong>What happened</strong><span>${escapeHtml(brief.summary)}</span></div>${findings ? `<div><strong>Still needs attention</strong><ul>${findings}</ul></div>` : ""}<div><strong>What to send</strong><span>Tell ${escapeHtml(profile(run.plan?.tasks.find((item) => item.id === task.id)?.worker)?.name || "the team")} what to prioritize, clarify the expected behavior, or confirm an acceptable trade-off.</span></div></div>`;
 }
+// Active until the persona returns a result (or hits a budget); the age cap covers a run that died mid-work.
+function recentlyActive(persona, staleMs = 600_000) {
+  const last = state.events.filter((item) => item.persona === persona).at(-1);
+  if (!last || ["responded", "budget-exhausted"].includes(last.event)) return false;
+  return Date.now() - new Date(last.at).getTime() < staleMs;
+}
 function agentStatus(id, run) {
   if (!run) return "At their desk";
   const task = run.tasks.find((item) => run.plan?.tasks.find((plan) => plan.id === item.id)?.worker === id && ["doing", "review", "blocked"].includes(item.status));
   if (task) return task.status === "blocked" ? "Needs your input" : task.status === "review" ? "In review" : "Working on a task";
   if (run.status === "planning" && id === "marlow") return "Planning the goal";
-  if (run.status === "doing" && id === "juniper") return "Researching";
+  if (run.status === "doing" && id === "juniper" && recentlyActive("juniper")) return "Researching";
   if (run.status === "awaiting-review" && id === "tove") return "QA complete";
   if (id === "piper" && run.preview?.status === "healthy") return "Preview running";
   if (id === "piper" && ["waiting-secret", "waiting-approval", "failed"].includes(run.preview?.status)) return "Needs your input";
