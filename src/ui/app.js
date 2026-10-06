@@ -101,6 +101,27 @@ function renderSidebar() {
 }
 
 function taskLabel(task, run) { return run?.plan?.tasks.find((item) => item.id === task.id)?.title || task.id; }
+function blockedTaskBrief(run, task) {
+  const findings = [];
+  const review = task.review?.replace(/^CHANGES_NEEDED:\s*/i, "").trim();
+  const qa = task.qa?.replace(/^ISSUES:\s*/i, "").trim();
+  const failedChecks = (task.checks || []).filter((check) => check.status === "failed" || check.required && check.status === "missing");
+  if (review && !/^APPROVED:/i.test(task.review || "")) findings.push({ label: "Review", text: review });
+  if (qa && !/^PASS:/i.test(task.qa || "")) findings.push({ label: "QA", text: qa });
+  failedChecks.forEach((check) => findings.push({ label: check.status === "missing" ? "Setup needed" : "Check failed", text: `${check.name}: ${check.output}` }));
+  if (!findings.length && task.error) findings.push({ label: "Blocked because", text: task.error });
+  return {
+    task: taskLabel(task, run),
+    summary: task.error || "The task is blocked and cannot continue automatically.",
+    findings: findings.slice(0, 4),
+  };
+}
+
+function blockedTaskDetails(run, task) {
+  const brief = blockedTaskBrief(run, task);
+  const findings = brief.findings.map((finding) => `<li><strong>${escapeHtml(finding.label)}:</strong> ${escapeHtml(finding.text)}</li>`).join("");
+  return `<div class="prompt-request"><div><strong>Task</strong><span>${escapeHtml(brief.task)}</span></div><div><strong>What happened</strong><span>${escapeHtml(brief.summary)}</span></div>${findings ? `<div><strong>Still needs attention</strong><ul>${findings}</ul></div>` : ""}<div><strong>What to send</strong><span>Tell ${escapeHtml(profile(run.plan?.tasks.find((item) => item.id === task.id)?.worker)?.name || "the team")} what to prioritize, clarify the expected behavior, or confirm an acceptable trade-off.</span></div></div>`;
+}
 function agentStatus(id, run) {
   if (!run) return "At their desk";
   const task = run.tasks.find((item) => run.plan?.tasks.find((plan) => plan.id === item.id)?.worker === id && ["doing", "review", "blocked"].includes(item.status));
@@ -226,11 +247,12 @@ function renderAnalytics() {
 function showInputPrompt(run, blocked, worker) {
   if ($("#input-prompt")) return;
   const name = profile(worker)?.name || "The team";
+  const details = blockedTaskDetails(run, blocked);
   const modal = document.createElement("div");
   modal.className = "input-prompt-backdrop";
   modal.id = "input-prompt";
   modal.dataset.run = run.id;
-  modal.innerHTML = `<div class="input-prompt" role="dialog" aria-modal="true" aria-label="${escapeHtml(name)} needs your input"><button class="prompt-close" data-close="input" aria-label="Answer later">✕</button><div class="prompt-scene"><div class="prompt-podium"></div>${avatar(worker || "marlow", "prompt-avatar")}<span class="prompt-alert">!</span></div><span class="eyebrow">A MESSAGE FROM THE WORKSHOP</span><h2>${escapeHtml(name)} needs your direction.</h2><p>${escapeHtml(blocked.error || "What should I do next?")}</p><form id="answer-pop-form"><textarea name="answer" rows="3" maxlength="8000" placeholder="Write your answer…" required></textarea><button class="primary-button" type="submit">Send answer to ${escapeHtml(name)} →</button></form><small>You can answer later from the task wall.</small></div>`;
+  modal.innerHTML = `<div class="input-prompt" role="dialog" aria-modal="true" aria-label="${escapeHtml(name)} needs your input"><button class="prompt-close" data-close="input" aria-label="Answer later">✕</button><div class="prompt-scene"><div class="prompt-podium"></div>${avatar(worker || "marlow", "prompt-avatar")}<span class="prompt-alert">!</span></div><span class="eyebrow">A MESSAGE FROM THE WORKSHOP</span><h2>${escapeHtml(name)} needs your direction.</h2><p class="prompt-lede">One repair pass is complete, but this task still needs a decision.</p>${details}<form id="answer-pop-form"><textarea name="answer" rows="3" maxlength="8000" placeholder="Write your answer…" required></textarea><button class="primary-button" type="submit">Send answer to ${escapeHtml(name)} →</button></form><small>You can answer later from the task wall.</small></div>`;
   document.body.append(modal);
 }
 
