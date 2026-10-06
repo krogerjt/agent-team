@@ -42,6 +42,21 @@ export interface TeamRunState {
   runDir: string;
 }
 
+export interface RunEvent {
+  at: string;
+  persona: string;
+  event: string;
+  detail: string;
+}
+
+type EventListener = (runId: string, event: RunEvent) => void;
+const eventListeners = new Set<EventListener>();
+
+export function subscribeToRunEvents(listener: EventListener): () => void {
+  eventListeners.add(listener);
+  return () => eventListeners.delete(listener);
+}
+
 export function repoHome(repo: string): string {
   const hash = createHash("sha256").update(path.resolve(repo).toLowerCase()).digest("hex").slice(0, 12);
   return path.join(process.env.AGENT_TEAM_DATA_DIR ? path.resolve(process.env.AGENT_TEAM_DATA_DIR) : path.join(os.homedir(), ".agent-team"), "repos", `${path.basename(repo)}-${hash}`);
@@ -85,5 +100,9 @@ export async function appendLibrary(state: TeamRunState, note: string): Promise<
 }
 
 export async function logEvent(state: TeamRunState, persona: string, event: string, detail: string): Promise<void> {
-  await appendFile(path.join(state.runDir, "events.jsonl"), JSON.stringify({ at: new Date().toISOString(), persona, event, detail: detail.slice(0, 2_000) }) + "\n");
+  const record: RunEvent = { at: new Date().toISOString(), persona, event, detail: detail.slice(0, 2_000) };
+  await appendFile(path.join(state.runDir, "events.jsonl"), JSON.stringify(record) + "\n");
+  for (const listener of eventListeners) {
+    try { listener(state.id, record); } catch { /* a disconnected UI must not affect the run */ }
+  }
 }

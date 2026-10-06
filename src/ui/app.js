@@ -1,4 +1,4 @@
-const state = { repo: "", repositories: [], head: "", profiles: [], runs: [], library: "", jobs: {}, selectedRun: null, selectedAgent: "marlow", view: "workshop", panelTab: "chat", review: null, events: [], apiToken: "", appleProject: false, remoteHost: { enabled: false, target: "" } };
+const state = { repo: "", repositories: [], head: "", profiles: [], runs: [], library: "", jobs: {}, selectedRun: null, selectedAgent: "marlow", view: "workshop", panelTab: "chat", review: null, events: [], apiToken: "", appleProject: false, remoteHost: { enabled: false, target: "" }, statusFilters: { persona: "all", event: "all", run: "selected" }, eventStream: null };
 const dismissedPrompts = new Set();
 let optionSecrets = {};
 let workspaceVersion = 0;
@@ -18,6 +18,8 @@ const el = (tag, className, content) => { const node = document.createElement(ta
 const profile = (id) => state.profiles.find((item) => item.id === id);
 const currentRun = () => state.runs.find((item) => item.id === state.selectedRun);
 const fmt = (date) => { try { return new Date(date).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); } catch { return date; } };
+const eventColor = (persona) => colors[persona]?.[0] || "#9da7c4";
+const eventName = (persona) => profile(persona)?.name || (persona === "host" ? "Workshop" : persona === "user" ? "You" : persona);
 
 function avatar(id, size = "") {
   const [accent, hair, coat, skin] = colors[id];
@@ -94,7 +96,7 @@ async function refresh(quiet = false) {
 
 function renderSidebar() {
   document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("active", button.dataset.view === state.view));
-  $("#page-title").textContent = state.view === "library" ? "SHARED LIBRARY" : state.view === "bench" ? "TEST BENCH" : "WORKSHOP";
+  $("#page-title").textContent = state.view === "library" ? "SHARED LIBRARY" : state.view === "bench" ? "TEST BENCH" : state.view === "status" ? "STATUS BOARD" : "WORKSHOP";
   $("#run-list").innerHTML = state.runs.length ? state.runs.slice(0, 8).map((run) => `<button class="run-nav ${run.id === state.selectedRun && state.view === "workshop" ? "selected" : ""}" data-run="${escapeHtml(run.id)}"><span class="run-dot ${escapeHtml(run.status)}"></span><span><strong>${escapeHtml(run.goal)}</strong><small>${escapeHtml(run.status.replaceAll("-", " "))} · ${fmt(Number(run.id.split("-")[0]))}</small></span></button>`).join("") : `<p class="sidebar-empty">Your first goal will appear here.</p>`;
 }
 
@@ -119,6 +121,71 @@ function agentStateClass(id, run) {
   return "idle";
 }
 
+function statusEventRows() {
+  const { persona, event, run } = state.statusFilters;
+  const selectedRun = currentRun();
+  return state.events.filter((item) =>
+    (persona === "all" || item.persona === persona) &&
+    (event === "all" || item.event === event) &&
+    (run === "selected" || run === "all" || !selectedRun || run === selectedRun.id)
+  ).slice().reverse();
+}
+
+function renderStatusEvents() {
+  const node = $("#status-event-list"); if (!node) return;
+  const events = statusEventRows();
+  node.innerHTML = events.length ? events.map((item, index) => {
+    const color = eventColor(item.persona);
+    const files = item.files?.length ? `<div class="status-event-files">${item.files.map((file) => `<code>${escapeHtml(file)}</code>`).join("")}</div>` : "";
+    return `<details class="status-event" style="--event-accent:${color}" ${index === 0 ? "open" : ""}><summary><span class="status-event-mark" aria-hidden="true"></span><span class="status-event-main"><strong>${escapeHtml(eventName(item.persona))}</strong><span class="status-event-type">${escapeHtml(item.event.replaceAll("-", " "))}</span><span class="status-event-summary">${escapeHtml(item.detail)}</span></span><time>${fmt(item.at)}</time><span class="status-event-chevron">⌄</span></summary><div class="status-event-detail"><p>${escapeHtml(item.detail)}</p>${files}<small>${escapeHtml(item.runId ? `Run ${item.runId}${item.taskId ? ` · ${item.taskId}` : ""}` : "Live run event")}</small></div></details>`;
+  }).join("") : `<div class="status-empty"><span>◌</span><h3>No events match these filters.</h3><p>New activity will appear here as the selected run moves forward.</p></div>`;
+  const count = $("#status-event-count"); if (count) count.textContent = `${events.length} event${events.length === 1 ? "" : "s"}`;
+}
+
+function closeEventStream() {
+  if (state.eventStream) { state.eventStream.close(); state.eventStream = null; }
+}
+
+function setStatusConnection(message, offline = false) {
+  const badge = $("#status-connection");
+  badge?.classList.toggle("offline", offline);
+  const label = badge?.querySelector("small");
+  if (label) label.textContent = message;
+}
+
+async function loadStatusEvents() {
+  closeEventStream();
+  setStatusConnection("Connecting…");
+  const runId = ["selected", "all"].includes(state.statusFilters.run) ? state.selectedRun : state.statusFilters.run;
+  const run = runId === "all" ? currentRun() : state.runs.find((item) => item.id === runId);
+  if (!run) { state.events = []; renderStatusEvents(); setStatusConnection("Choose a run", true); return; }
+  try {
+    state.events = await api(`/api/runs/${encodeURIComponent(run.id)}/events?limit=25`);
+    if (state.view !== "status") return;
+    renderStatusEvents();
+    state.eventStream = new EventSource(`/api/runs/${encodeURIComponent(run.id)}/events/stream`);
+    state.eventStream.addEventListener("run-event", (message) => {
+      try { state.events = [...state.events, JSON.parse(message.data)].slice(-25); renderStatusEvents(); } catch { /* ignore malformed event */ }
+    });
+    state.eventStream.onerror = () => setStatusConnection("Reconnecting…", true);
+    state.eventStream.onopen = () => setStatusConnection("Connected");
+  } catch (error) {
+    setStatusConnection("Unavailable", true);
+    const node = $("#status-event-list"); if (node) node.innerHTML = `<p class="subtle">${escapeHtml(error.message)}</p>`;
+  }
+}
+
+function renderStatusBoard() {
+  closeEventStream();
+  const run = currentRun();
+  const eventTypes = [...new Set(state.events.map((item) => item.event))].sort();
+  const personaOptions = state.profiles.map((item) => `<option value="${item.id}" ${state.statusFilters.persona === item.id ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("");
+  const eventOptions = eventTypes.map((item) => `<option value="${escapeHtml(item)}" ${state.statusFilters.event === item ? "selected" : ""}>${escapeHtml(item.replaceAll("-", " "))}</option>`).join("");
+  const runOptions = state.runs.slice(0, 12).map((item) => `<option value="${escapeHtml(item.id)}" ${state.statusFilters.run === item.id ? "selected" : ""}>${escapeHtml(item.goal)}</option>`).join("");
+  $("#main-content").innerHTML = `<section class="status-page"><div class="status-hero"><div><div class="eyebrow"><span class="live-mark"></span> THE WORKSHOP SIGNAL</div><h1>Status board</h1><p>Follow every logged move as the team turns a goal into a build.</p></div><div class="status-live-indicator" id="status-connection"><span></span><strong>LIVE FEED</strong><small>SSE connected</small></div></div><section class="status-card"><div class="status-toolbar"><div><small class="status-kicker">EVENT STREAM</small><h2>${escapeHtml(run?.goal || "Select a run")}</h2></div><span id="status-event-count" class="status-count">Loading…</span></div><div class="status-filters"><label>PERSONA<select id="status-persona-filter"><option value="all">Everyone</option>${personaOptions}</select></label><label>EVENT<select id="status-event-filter"><option value="all">All event types</option>${eventOptions}</select></label><label>RUN<select id="status-run-filter"><option value="selected">Selected run</option><option value="all">Current run</option>${runOptions}</select></label></div><div id="status-event-list" class="status-event-list"><p class="subtle">Loading live events…</p></div></section></section>`;
+  void loadStatusEvents();
+}
+
 function renderMain() {
   const main = $("#main-content");
   if (state.view === "library") {
@@ -127,6 +194,7 @@ function renderMain() {
     return;
   }
   if (state.view === "bench") { renderBench(); return; }
+  if (state.view === "status") { renderStatusBoard(); return; }
   const run = currentRun();
   const blocked = run?.tasks.find((task) => task.status === "blocked");
   const piperNeeds = run?.status === "blocked" && run.preview?.issue && !blocked;
@@ -367,7 +435,7 @@ async function switchRepository(repoPath) {
 
 document.addEventListener("click", async (event) => {
   const target = event.target.closest("button"); if (!target) return;
-  if (target.dataset.view) { state.view = target.dataset.view; renderSidebar(); renderMain(); return; }
+  if (target.dataset.view) { if (target.dataset.view !== "status") closeEventStream(); state.view = target.dataset.view; renderSidebar(); renderMain(); return; }
   if (target.dataset.run) { const previous = state.selectedRun; state.selectedRun = target.dataset.run; if (previous && previous !== state.selectedRun) void api(`/api/runs/${previous}/preview/stop`, { method: "POST", body: "{}" }); state.view = "workshop"; renderSidebar(); renderMain(); return; }
   if (target.dataset.agent) { state.selectedAgent = target.dataset.agent; state.panelTab = "chat"; renderMain(); renderPanel(); if (window.innerWidth <= 1050) $("#detail-panel").scrollIntoView({ behavior: "smooth" }); return; }
   if (target.dataset.tab) { state.panelTab = target.dataset.tab; renderPanel(); return; }
@@ -501,6 +569,13 @@ document.addEventListener("submit", async (event) => {
 });
 
 document.addEventListener("change", (event) => {
+  if (event.target.id === "status-persona-filter" || event.target.id === "status-event-filter" || event.target.id === "status-run-filter") {
+    const key = event.target.id === "status-persona-filter" ? "persona" : event.target.id === "status-event-filter" ? "event" : "run";
+    state.statusFilters[key] = event.target.value;
+    if (key === "run" && !["selected", "all"].includes(event.target.value)) state.selectedRun = event.target.value;
+    renderSidebar(); renderStatusBoard();
+    return;
+  }
   if (event.target.id !== "provider-select") return;
   const selected = event.target.value;
   const model = $("#model-input");

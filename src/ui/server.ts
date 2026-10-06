@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { git } from "../coding/git.js";
 import { roster, type PersonaId } from "../personas/roster.js";
 import { effectiveModel, isPersonaId, readPersona, updatePersona } from "../team/persona-store.js";
-import { loadState, readLibrary, repoHome, saveState, type TeamRunState } from "../team/state.js";
+import { loadState, readLibrary, repoHome, saveState, subscribeToRunEvents, type RunEvent, type TeamRunState } from "../team/state.js";
 import { answerTeamRun, chatTeamPersona, mergeTeamRun, messageTeamPersona, reviewTeamRun, runTeamGoal, resumeTeamPreview, startTeamPreview } from "../team/workflow.js";
 import { getTimelineEntry, searchTimeline } from "../team/timeline.js";
 import { listSecrets, setSecret } from "../preview/secrets.js";
@@ -30,6 +30,17 @@ const apiToken = randomUUID();
 let switchingRepository = false;
 let activeMutations = 0;
 const gitLocks = new Set<string>();
+const eventStreams = new Map<string, Set<ServerResponse>>();
+
+subscribeToRunEvents((runId, event) => {
+  const listeners = eventStreams.get(runId);
+  if (!listeners) return;
+  const payload = `event: run-event\ndata: ${JSON.stringify(event)}\n\n`;
+  for (const client of listeners) {
+    try { client.write(payload); } catch { listeners.delete(client); }
+  }
+  if (!listeners.size) eventStreams.delete(runId);
+});
 
 function assertRepositoryIdle(repo: string): void {
   if (activeMutations > 1 || [...jobs.values()].some((job) => job.repo === repo && job.status === "running") || activeReviews.size) throw new Error("Wait for the current work to finish before changing Git history.");
@@ -79,6 +90,12 @@ async function runs(repo: string): Promise<TeamRunState[]> {
     try { return await loadState(runPath(repo, name)); } catch { return undefined; }
   }));
   return states.filter((state): state is TeamRunState => Boolean(state)).sort((a, b) => b.id.localeCompare(a.id)).slice(0, 40);
+}
+
+async function readRunEvents(runDir: string, limit = 200): Promise<RunEvent[]> {
+  let contents = "";
+  try { contents = await readFile(path.join(runDir, "events.jsonl"), "utf8"); } catch { return []; }
+  return contents.trim().split("\n").filter(Boolean).slice(-Math.min(Math.max(limit, 1), 500)).map((line) => JSON.parse(line) as RunEvent);
 }
 
 async function hasAppleProject(repo: string): Promise<boolean> {
@@ -269,9 +286,8 @@ async function serve(req: IncomingMessage, res: ServerResponse, workspace: { rep
     if (method === "GET" && !action) { json(res, 200, await loadState(runDir)); return; }
     if (method === "GET" && action === "review") { const review = await reviewTeamRun(runDir); json(res, 200, { ...review, readiness: await mergeReadiness(review.state) }); return; }
     if (method === "GET" && action === "events") {
-      let contents = "";
-      try { contents = await readFile(path.join(runDir, "events.jsonl"), "utf8"); } catch { /* no events yet */ }
-      json(res, 200, contents.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))); return;
+      const requested = Number(url.searchParams.get("limit") ?? "200");
+      json(res, 200, await readRunEvents(runDir, Number.isFinite(requested) ? requested : 200)); return;
     }
     if (method === "POST" && action === "answer") {
       if (activeRuns.has(runMatch[1])) throw new Error("This run is already working.");
@@ -300,6 +316,21 @@ async function serve(req: IncomingMessage, res: ServerResponse, workspace: { rep
       assertRepositoryIdle(repo);
       json(res, 200, await gitAction(repo, () => resolveRunConflict(runDir, string(input.file, "a conflict file", 2_000), input.choice as "current" | "team"))); return;
     }
+  }
+  const eventStreamMatch = /^\/api\/runs\/([^/]+)\/events\/stream$/.exec(url.pathname);
+  if (method === "GET" && eventStreamMatch) {
+    const runDir = runPath(repo, eventStreamMatch[1]);
+    await loadState(runDir);
+    const listeners = eventStreams.get(eventStreamMatch[1]) ?? new Set<ServerResponse>();
+    eventStreams.set(eventStreamMatch[1], listeners);
+    res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-store", "Connection": "keep-alive", "X-Accel-Buffering": "no" });
+    res.write(`event: ready\ndata: ${JSON.stringify({ runId: eventStreamMatch[1] })}\n\n`);
+    listeners.add(res);
+    const cleanup = () => { listeners.delete(res); if (!listeners.size) eventStreams.delete(eventStreamMatch[1]); };
+    req.on("close", cleanup);
+    const heartbeat = setInterval(() => { try { res.write(": heartbeat\\n\\n"); } catch { cleanup(); clearInterval(heartbeat); } }, 15_000);
+    req.on("close", () => clearInterval(heartbeat));
+    return;
   }
   const previewMatch = /^\/api\/runs\/([^/]+)\/preview(?:\/(start|stop|resolve|screenshot))?$/.exec(url.pathname);
   if (previewMatch) {
@@ -338,6 +369,7 @@ async function serve(req: IncomingMessage, res: ServerResponse, workspace: { rep
     "/performance.css": ["performance.css", "text/css; charset=utf-8"],
     "/git-tools.css": ["git-tools.css", "text/css; charset=utf-8"],
     "/remote.css": ["remote.css", "text/css; charset=utf-8"],
+    "/status.css": ["status.css", "text/css; charset=utf-8"],
   };
   if (method === "GET" && url.pathname === "/favicon.ico") {
     res.writeHead(204, { "Cache-Control": "no-store" }); res.end(); return;
