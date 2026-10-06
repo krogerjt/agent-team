@@ -15,6 +15,7 @@ export class ToolBudget {
   private remaining: number;
   private rounds = 0;
   private traces: ToolCallTrace[] = [];
+  private lastFailure?: { signature: string; count: number };
   private readonly reportDiagnostics?: (diagnostics: ToolLoopDiagnostics) => void;
   toolCalls = 0;
 
@@ -44,18 +45,22 @@ export class ToolBudget {
     if (!request.tools.some((tool) => tool.name === name)) {
       trace.durationMs = Math.round(performance.now() - started);
       trace.isError = true;
-      return { content: `Unknown or unavailable tool: ${name}`, isError: true };
+      return this.failureResult(trace, `Unknown or unavailable tool: ${name}`);
     }
+    let result: ToolResult;
     try {
-      const result = await request.execute(name, args);
-      trace.durationMs = Math.round(performance.now() - started);
-      trace.isError = Boolean(result.isError);
-      return { content: result.content.slice(0, 24_000), isError: result.isError };
+      result = await request.execute(name, args);
     } catch (error) {
       trace.durationMs = Math.round(performance.now() - started);
       trace.isError = true;
-      return { content: error instanceof Error ? error.message : String(error), isError: true };
+      return this.failureResult(trace, error instanceof Error ? error.message : String(error));
     }
+    trace.durationMs = Math.round(performance.now() - started);
+    trace.isError = Boolean(result.isError);
+    const content = result.content.slice(0, 24_000);
+    if (result.isError) return this.failureResult(trace, content);
+    this.lastFailure = undefined;
+    return { content, isError: result.isError };
   }
 
   diagnostics(bottleneck?: string): ToolLoopDiagnostics {
@@ -66,10 +71,30 @@ export class ToolBudget {
     };
   }
 
+  private failureResult(trace: ToolCallTrace, content: string): ToolResult {
+    const error = content.slice(0, 1_000);
+    trace.error = error;
+    const signature = `${trace.name}:${error}`;
+    const count = this.lastFailure?.signature === signature ? this.lastFailure.count + 1 : 1;
+    this.lastFailure = { signature, count };
+    if (count >= 3) {
+      const diagnostics = this.diagnostics(`Repeated failure from ${trace.name} (${count} identical attempts): ${error}`);
+      const failure = new Error(
+        `Agent stopped after ${count} repeated ${trace.name} failures. ` +
+        `Bottleneck: ${error} ` +
+        `Recovery: inspect the current file/context before retrying this operation.`,
+      );
+      this.reportDiagnostics?.(diagnostics);
+      (failure as Error & { diagnostics?: ToolLoopDiagnostics }).diagnostics = diagnostics;
+      throw failure;
+    }
+    return { content, isError: true };
+  }
+
   private limitError(limit: string, bottleneck: string): Error {
     const diagnostics = this.diagnostics(bottleneck);
     const recent = diagnostics.calls.slice(-8).map((call) =>
-      `#${call.round} ${call.name}${call.isError ? " [error]" : ""}`).join(", ") || "none";
+      `#${call.round} ${call.name}${call.isError ? ` [error: ${call.error ?? "unknown"}]` : ""}`).join(", ") || "none";
     const error = new Error(
       `Agent exceeded ${limit}. Diagnostics: ${diagnostics.rounds}/${diagnostics.maxRounds} rounds, ` +
       `${diagnostics.toolCalls}/${diagnostics.maxToolCalls} tool calls. Recent tools: ${recent}. ` +

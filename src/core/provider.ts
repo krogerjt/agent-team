@@ -25,6 +25,7 @@ export interface ToolCallTrace {
   args: Record<string, unknown>;
   durationMs?: number;
   isError?: boolean;
+  error?: string;
 }
 
 export interface ToolLoopDiagnostics {
