@@ -3,3 +3,6 @@ dist/
 .env
 .env.*
 !.env.example
+*.keychain
+*.keychain-db
+mac-build-host.env

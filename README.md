@@ -54,7 +54,17 @@ The Windows workshop can send Apple checks to a Mac without keeping repository c
 
 In the workshop, open **Options → Mac Build Host**. Enter the SSH alias or `user@host`, test the connection, and enable it. The readiness panel checks macOS, Xcode, simulators, Keychain access, archive tools, and free space. For each check pass, the runner uploads the exact non-ignored worktree to a disposable directory, reuses only build caches, streams Xcode output back, retrieves XCTest summaries and screenshot attachments, and removes the uploaded source.
 
-The same panel stores a per-repository preparation command such as `bundle exec pod install` and maps environment variables to secrets in the Mac login Keychain. Secret values travel over SSH when saved and are never written to the Windows settings file. Keep the Mac powered, awake, and reachable while goals are running.
+Before testing the host, create a dedicated Keychain on the Mac and configure its password in a Mac-only file. For example, create `~/Library/Keychains/agent-team.keychain-db` with Keychain Access or the `security create-keychain` command, then create `~/.agent-team/mac-build-host.env` with mode `600` containing:
+
+```sh
+AGENT_TEAM_MAC_KEYCHAIN_PASSWORD='use-your-local-build-keychain-password'
+# Optional override:
+# AGENT_TEAM_MAC_KEYCHAIN_PATH="$HOME/Library/Keychains/agent-team.keychain-db"
+```
+
+The Mac Build Host test checks that this dedicated **Agent Team Build Keychain** exists, unlocks it over SSH, and can read it. It reports a missing Keychain or password configuration with the required initialization step. The helper locks it again after 15 minutes. Do not commit the Keychain or the configuration file. The normal macOS login Keychain is not changed.
+
+The same panel stores a per-repository preparation command such as `bundle exec pod install` and maps environment variables to secrets in the Agent Team Build Keychain. Secret values travel over SSH only while being saved; build commands resolve them on the Mac, and only mapping names remain in Windows settings. Keep the Mac powered, awake, and reachable while goals are running.
 
 ## Seven-person team
 

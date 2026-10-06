@@ -6,11 +6,11 @@ import { git } from "../coding/git.js";
 import type { CheckArtifact, CheckCommand, CheckResult, CheckRunContext } from "../coding/checks.js";
 import { selectSimulatorDestination } from "../coding/apple.js";
 import { readRemoteBuildHost, readRemoteProjectSettings, validateRemoteBuildHost, type RemoteBuildHost } from "./settings.js";
+import { buildKeychainShell, keychainHealthScript, keychainRedactionScript, keychainSecretLookup, keychainSecretStore } from "./keychain.js";
 
 export interface RemoteReadinessItem { name: string; ok: boolean; detail: string }
 export interface RemoteReadiness { ok: boolean; target: string; items: RemoteReadinessItem[] }
 
-const KEYCHAIN_SERVICE = "com.openai.agent-team.remote-build";
 const LIMIT = 12_000;
 
 function quote(value: string): string { return `'${value.replaceAll("'", `'"'"'`)}'`; }
@@ -40,21 +40,25 @@ function remotePaths(host: RemoteBuildHost, id: string): { root: string; job: st
   return { root, job: `${root}/jobs/${id}`, source: `${root}/jobs/${id}/source`, cache: `${root}/cache` };
 }
 
-export async function testRemoteBuildHost(host: RemoteBuildHost, setupCommand = ""): Promise<RemoteReadiness> {
+export type RemoteScriptRunner = (host: RemoteBuildHost, script: string, timeoutMs?: number, maxOutput?: number) => Promise<{ code: number; output: string }>;
+
+export async function testRemoteBuildHost(host: RemoteBuildHost, setupCommand = "", run: RemoteScriptRunner = sshScript): Promise<RemoteReadiness> {
   host = validateRemoteBuildHost(host);
   const items: RemoteReadinessItem[] = [];
   if (!host.target) return { ok: false, target: "", items: [{ name: "SSH target", ok: false, detail: "Enter a Mac SSH alias or user@host." }] };
-  const result = await sshScript(host, `
+  const keychain = await run(host, `${keychainHealthScript()}
+`, 20_000);
+  const result = await run(host, `
 set +e
 printf 'MACOS\t'; sw_vers -productVersion 2>/dev/null || true
 printf 'XCODE\t'; xcodebuild -version 2>/dev/null | head -1 || true
 printf 'SIMULATORS\t'; xcrun simctl list devices available 2>/dev/null | grep -Ec 'iPhone|iPad|Apple TV|Apple Watch|Vision Pro' || true
 printf 'TAR\t'; command -v tar 2>/dev/null || true
-printf 'KEYCHAIN\t'; security show-keychain-info >/dev/null 2>&1 && printf unlocked || printf unavailable
 printf '\nPOD\t'; command -v pod 2>/dev/null || true
 printf 'BUNDLE\t'; command -v bundle 2>/dev/null || true
 printf '\nDISK\t'; df -Pk "$HOME" 2>/dev/null | tail -1 | awk '{print $4}'
 `, 20_000);
+  if (keychain.code !== 0) return { ok: false, target: host.target, items: [{ name: "SSH connection", ok: true, detail: host.target }, { name: "Agent Team Build Keychain", ok: false, detail: keychain.output.trim() || "The dedicated build Keychain could not be unlocked or read." }] };
   if (result.code !== 0) return { ok: false, target: host.target, items: [{ name: "SSH connection", ok: false, detail: result.output.trim() || `ssh exited ${result.code}` }] };
   const values = Object.fromEntries(result.output.split(/\r?\n/).map((line) => line.split("\t", 2)).filter((parts) => parts.length === 2));
   items.push({ name: "SSH connection", ok: true, detail: host.target });
@@ -62,7 +66,7 @@ printf '\nDISK\t'; df -Pk "$HOME" 2>/dev/null | tail -1 | awk '{print $4}'
   items.push({ name: "Full Xcode", ok: /^Xcode /.test(values.XCODE ?? ""), detail: values.XCODE || "Install and initialize full Xcode" });
   items.push({ name: "Simulator", ok: Number(values.SIMULATORS) > 0, detail: Number(values.SIMULATORS) > 0 ? `${values.SIMULATORS} available devices` : "Install an Apple simulator runtime" });
   items.push({ name: "Archive tool", ok: Boolean(values.TAR), detail: values.TAR || "tar was not found" });
-  items.push({ name: "Login Keychain", ok: values.KEYCHAIN === "unlocked", detail: values.KEYCHAIN === "unlocked" ? "Available" : "The login Keychain is locked or unavailable" });
+  items.push({ name: "Agent Team Build Keychain", ok: true, detail: "Exists, unlocked, and readable" });
   if (/\bpod(?:\s|$)/.test(setupCommand)) items.push({ name: "CocoaPods", ok: Boolean(values.POD), detail: values.POD || "Install CocoaPods on the Mac" });
   if (/\bbundle(?:\s|$)/.test(setupCommand)) items.push({ name: "Bundler", ok: Boolean(values.BUNDLE), detail: values.BUNDLE || "Install Bundler on the Mac" });
   const freeKb = Number(values.DISK ?? 0);
@@ -73,14 +77,8 @@ printf '\nDISK\t'; df -Pk "$HOME" 2>/dev/null | tail -1 | awk '{print $4}'
 export async function saveRemoteKeychainSecret(host: RemoteBuildHost, name: string, value: string): Promise<void> {
   host = validateRemoteBuildHost(host);
   if (!/^[A-Za-z][A-Za-z0-9_.:/-]{0,99}$/.test(name) || !value || value.length > 8_000) throw new Error("Invalid remote secret name or value.");
-  const result = await sshScript(host, `set -e\n/usr/bin/security add-generic-password -U -a ${quote(name)} -s ${quote(KEYCHAIN_SERVICE)} -w ${quote(value)} >/dev/null\n`);
-  if (result.code !== 0) throw new Error(`Could not save the Mac Keychain secret: ${result.output.trim()}`);
-}
-
-async function remoteSecret(host: RemoteBuildHost, name: string): Promise<string> {
-  const result = await sshScript(host, `/usr/bin/security find-generic-password -w -a ${quote(name)} -s ${quote(KEYCHAIN_SERVICE)}\n`);
-  if (result.code !== 0) throw new Error(`Mac Keychain secret '${name}' is unavailable.`);
-  return result.output.replace(/\r?\n$/, "");
+  const result = await sshScript(host, `${buildKeychainShell()}\n${keychainSecretStore(name, value)}\n`);
+  if (result.code !== 0) throw new Error(`Could not save the Mac Build Keychain secret '${name}'. ${result.output.trim()}`.trim());
 }
 
 async function upload(root: string, host: RemoteBuildHost, remoteSource: string): Promise<void> {
@@ -101,12 +99,6 @@ async function upload(root: string, host: RemoteBuildHost, remoteSource: string)
     unpack.on("close", (code) => { unpackCode = code; finish(); });
     pack.stdout.pipe(unpack.stdin); pack.stdin.end(names);
   });
-}
-
-function redacted(output: string, values: string[]): string {
-  let clean = output;
-  for (const value of values) if (value) clean = clean.replaceAll(value, "[redacted]");
-  return clean.slice(-LIMIT);
 }
 
 async function collectFiles(folder: string): Promise<string[]> {
@@ -151,8 +143,7 @@ export async function runRemoteChecks(root: string, commands: CheckCommand[], co
       const setup = await sshScript(host, `set -e\ncd ${paths.source}\n${project.setupCommand}\n`, 600_000);
       if (setup.code !== 0) return commands.map((command) => ({ name: command.name, status: "failed", required: true, executor: host.target, output: `Remote preparation failed:\n${setup.output}` }));
     }
-    const secretEntries = await Promise.all(Object.entries(project.secrets).map(async ([variable, name]) => [variable, await remoteSecret(host, name)] as const));
-    const secretValues = secretEntries.map(([, value]) => value);
+    const secretEntries = Object.entries(project.secrets);
     for (let index = 0; index < commands.length; index++) {
       const command = commands[index];
       let args = [...command.args];
@@ -168,10 +159,11 @@ export async function runRemoteChecks(root: string, commands: CheckCommand[], co
         args.push("-derivedDataPath", `${paths.cache}/DerivedData`);
         if (isTest) args.push("-resultBundlePath", remoteResult);
       }
-      const exports = secretEntries.map(([variable, value]) => `export ${variable}=${quote(value)}`).join("\n");
-      const script = `set -o pipefail\n${exports}\ncd ${paths.source}\n${quote(command.executable)} ${args.map(quote).join(" ")}\n`;
+      const exports = secretEntries.map(([variable, name]) => `export ${variable}="$(${keychainSecretLookup(name)})" || { printf '%s\\n' ${quote(`Mac Build Keychain secret '${name}' is unavailable.`)} >&2; exit 23; }`).join("\n");
+      const redactions = secretEntries.map(([variable]) => keychainRedactionScript(variable)).join(" | ");
+      const script = `${buildKeychainShell()}\nset -o pipefail\n${exports}\ncd ${paths.source}\noutput=$(mktemp)\ntrap 'rm -f "$output"' EXIT\nset +e\n${quote(command.executable)} ${args.map(quote).join(" ")} >"$output" 2>&1\ncode=$?\nset -e\n${redactions ? `${redactions} "$output"` : `cat "$output"`}\nprintf '\\n'\nexit "$code"\n`;
       const execution = await sshScript(host, script, command.timeoutMs ?? 600_000);
-      const result: CheckResult = { name: command.name, status: execution.code === 0 ? "passed" : "failed", required: true, executor: host.target, output: redacted(execution.output, secretValues) };
+      const result: CheckResult = { name: command.name, status: execution.code === 0 ? "passed" : "failed", required: true, executor: host.target, output: execution.output.slice(-LIMIT) };
       if (isTest) {
         const summary = await sshScript(host, `xcrun xcresulttool get test-results summary --path ${remoteResult} --compact 2>/dev/null || true\n`, 30_000, 100_000);
         if (summary.output.trim()) {
