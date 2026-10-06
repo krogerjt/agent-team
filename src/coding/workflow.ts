@@ -1,6 +1,6 @@
 import type { ModelProvider, ToolCapableProvider } from "../core/provider.js";
 import { requireToolProvider } from "../core/provider.js";
-import { createProvider } from "../config.js";
+import { createProvider, toolLoopLimits } from "../config.js";
 import { runChecks, type CheckResult } from "./checks.js";
 import { createWorktree, diff, resolveCleanRepo, type Worktree } from "./git.js";
 import { WorkspaceTools } from "./workspace-tools.js";
@@ -30,8 +30,7 @@ function toolRequest(provider: ToolCapableProvider, systemPrompt: string, userPr
     userPrompt,
     tools: tools.definitions,
     execute: (name, args) => tools.execute(name, args),
-    maxToolCalls: 20,
-    maxRounds: 12,
+    ...toolLoopLimits(),
   });
 }
 

@@ -56,6 +56,18 @@ test("reports platform-specific checks as unavailable without executing them", a
   assert.match(result.output, /requires/);
 });
 
+test("detects XcodeGen generation, simulator build and tests before an xcodeproj exists", async () => {
+  const { root, parent } = await tempRepo();
+  cleanup.push(parent);
+  await writeFile(path.join(root, "project.yml"), "name: Example\ntargets:\n  Example:\n    type: application\n    platform: iOS\nschemes:\n  Example:\n    build:\n      targets:\n        Example: all\n    test:\n      targets: [ExampleTests]\n");
+  const checks = await detectChecks(root);
+  assert.deepEqual(checks.map((check) => check.executable), ["xcodegen", "xcodebuild", "xcodebuild"]);
+  assert.deepEqual(checks[0].args, ["generate", "--spec", "project.yml"]);
+  assert.equal(checks[1].args[1], "Example.xcodeproj");
+  assert.equal(checks[2].simulatorPlatform, "iOS");
+  assert.ok(checks.every((check) => check.platform === "darwin"));
+});
+
 test("selects a booted simulator for the detected Apple platform", () => {
   const listing = JSON.stringify({ devices: {
     "com.apple.CoreSimulator.SimRuntime.iOS-18-4": [

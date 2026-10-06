@@ -7,13 +7,15 @@ import { roster, type PersonaId, type WorkerId } from "../personas/roster.js";
 import { orderedTasks, parsePlan, type TeamTask } from "./plan.js";
 import { appendLibrary, createRunState, loadState, logEvent, readLibrary, repoHome, saveState, type TaskState, type TeamRunState } from "./state.js";
 import { appendChat, configuredProvider, effectiveModel, personaContext, readPersona } from "./persona-store.js";
-import { trackedGenerate, trackedGenerateWithTools } from "./telemetry.js";
+import { readToolLoopDiagnostics, trackedGenerate, trackedGenerateWithTools } from "./telemetry.js";
 import { appendTimeline, ensureTimeline, executeMemoryTool, memoryTools } from "./timeline.js";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { extractCookbook, readCookbook, saveCookbook, type Cookbook } from "../preview/cookbook.js";
 import { livePreview, startPreview, stopPreview, PreviewFailure, PreviewPause, PreviewStopped, type PreviewInfo } from "../preview/runtime.js";
 import { inspectPreview, runBrowserSteps, screenshotData, type BrowserStep } from "../preview/browser.js";
+import { buildEnvironmentTools, executeBuildEnvironmentTool } from "./environment-tools.js";
+import { toolLoopLimits } from "../config.js";
 
 export type TeamProviders = Record<PersonaId, ModelProvider>;
 const stopPreviewTool = { name: "stop_preview", description: "Stop the local preview for this run when it is no longer needed.", parameters: { type: "object", properties: {}, required: [], additionalProperties: false } };
@@ -23,8 +25,20 @@ async function generateFor(state: TeamRunState, persona: PersonaId, provider: Mo
   return trackedGenerate(state.repo, persona, await effectiveModel(state.repo, persona), provider, request);
 }
 
-async function generateToolsFor(state: TeamRunState, persona: PersonaId, provider: ToolCapableProvider, request: Parameters<ToolCapableProvider["generateWithTools"]>[0]) {
-  return trackedGenerateWithTools(state.repo, persona, await effectiveModel(state.repo, persona), provider, request);
+async function generateToolsFor(state: TeamRunState, persona: PersonaId, provider: ToolCapableProvider, request: Parameters<ToolCapableProvider["generateWithTools"]>[0], journalWork = true) {
+  try {
+    return await trackedGenerateWithTools(state.repo, persona, await effectiveModel(state.repo, persona), provider, request);
+  } catch (error) {
+    const diagnostics = readToolLoopDiagnostics(error);
+    if (diagnostics) {
+      const toolsUsed = diagnostics.calls.map((call) => `#${call.round} ${call.name}`).join(" → ") || "none";
+      const lastCalls = diagnostics.calls.slice(-6).map((call) => `${call.name}(${JSON.stringify(call.args).slice(0, 180)})`).join(" | ") || "none";
+      const detail = `${error instanceof Error ? error.message : String(error)}\nTools tried (${diagnostics.calls.length}): ${toolsUsed}\nLast call arguments: ${lastCalls}\nBottleneck: ${diagnostics.bottleneck ?? "unknown"}`;
+      if (journalWork) await recordRunEvent(state, persona, "budget-exhausted", detail, { summary: `${roster[persona].name} hit a loop budget` });
+      else await logEvent(state, persona, "budget-exhausted", detail);
+    }
+    throw error;
+  }
 }
 
 async function defaultProviders(repo: string): Promise<TeamProviders> {
@@ -58,13 +72,14 @@ async function askWithTools(
   prompt: string, tools: WorkspaceTools, journalWork = true,
 ): Promise<string> {
   const personal = await personaContext(state.repo, persona);
+  const writable = tools.definitions.some((tool) => tool.name === "apply_patch");
   const activeTitle = state.plan?.tasks.find((task) => state.tasks.some((item) => item.id === task.id && (item.status === "doing" || item.status === "review")))?.title ?? state.goal;
   if (journalWork) await recordRunEvent(state, persona, "started", prompt.slice(0, 300), { summary: `${roster[persona].name} started ${activeTitle}` });
   else await logEvent(state, persona, "started", prompt.slice(0, 300));
   const response = await generateToolsFor(state, persona, provider, {
     systemPrompt: `${roster[persona].systemPrompt}\n${personal}`,
     userPrompt: prompt,
-    tools: [...tools.definitions, ...memoryTools, stopPreviewTool, ...(state.tasks.length && state.tasks.every((task) => task.status === "done") && persona !== "piper" ? [startPreviewTool] : [])],
+    tools: [...tools.definitions, ...memoryTools, ...buildEnvironmentTools(writable), stopPreviewTool, ...(state.tasks.length && state.tasks.every((task) => task.status === "done") && persona !== "piper" ? [startPreviewTool] : [])],
     execute: async (name, args) => {
       if (name === "stop_preview") { await stopPreview(state.id); if (state.preview) { state.preview.status = "stopped"; state.preview.url = undefined; await saveState(state); } return { content: "Preview stopped." }; }
       if (name === "start_preview") {
@@ -82,13 +97,13 @@ async function askWithTools(
         files: typeof args.path === "string" ? [args.path] : [],
       });
       else await logEvent(state, persona, "tool", `${name} ${JSON.stringify(args).slice(0, 300)}`);
+      if (name === "inspect_build_environment" || name === "run_checks") return executeBuildEnvironmentTool(name, tools.root, state.repo, writable, { runDir: state.runDir, taskId: state.tasks.find((task) => task.status === "doing")?.id });
       return tools.execute(name, args);
     },
-    maxToolCalls: 20,
-    maxRounds: 12,
-  });
-  if (journalWork) await recordRunEvent(state, persona, "finished", `tool calls: ${response.toolCalls}; ${response.text.slice(0, 1_500)}`, { summary: `${roster[persona].name} finished ${activeTitle}` });
-  else await logEvent(state, persona, "finished", `tool calls: ${response.toolCalls}; ${response.text.slice(0, 300)}`);
+    ...toolLoopLimits(),
+  }, journalWork);
+  if (journalWork) await recordRunEvent(state, persona, "responded", `tool calls: ${response.toolCalls}; ${response.text.slice(0, 1_500)}`, { summary: `${roster[persona].name} returned findings for ${activeTitle}; acceptance checks are separate` });
+  else await logEvent(state, persona, "responded", `tool calls: ${response.toolCalls}; ${response.text.slice(0, 300)}`);
   if (!response.text.trim()) throw new Error(`${roster[persona].name} returned an empty response.`);
   return response.text.trim();
 }
@@ -155,6 +170,15 @@ async function executeTask(
   if (unavailable) {
     taskState.status = "blocked";
     taskState.error = `${unavailable.name} needs environment setup. Open Workshop Options → Mac Build Host. ${unavailable.output}`;
+    try {
+      const diagnosis = await askWithTools(state, "piper", requireToolProvider(providers.piper),
+        `The host could not run required checks for ${task.title}. Diagnose the environment using inspect_build_environment and repository files. Checks:\n${checksText(checks)}\nGive concrete setup steps and identify whether the problem is Mac connectivity, Xcode, simulator, Keychain or repository preparation. Do not edit application code or request secret values. Readiness alone does not verify a build.`,
+        new WorkspaceTools(worktree.path, "researcher"), false);
+      taskState.error += `\n\nPiper: ${diagnosis}`;
+      await recordRunEvent(state, "piper", "environment-blocked", diagnosis, { taskId: task.id, summary: `Diagnosed build environment for ${task.title}` });
+    } catch (error) {
+      taskState.error += `\nPiper's environment diagnosis was unavailable: ${error instanceof Error ? error.message : String(error)}`;
+    }
     await saveState(state);
     return false;
   }
@@ -499,12 +523,13 @@ export async function chatTeamPersona(repo: string, persona: PersonaId, message:
   const response = await trackedGenerateWithTools(repo, persona, await effectiveModel(repo, persona), provider, {
     systemPrompt: `${roster[persona].systemPrompt}\n${personal}`,
     userPrompt: `Recent conversation:\n${history || "(none)"}\nShared repository library:\n${library || "(empty)"}\nUser: ${message}\nReply as ${roster[persona].name}. You may inspect the repository, but do not edit files.`,
-    tools: [...tools.definitions, ...memoryTools],
+    tools: [...tools.definitions, ...memoryTools, ...buildEnvironmentTools(false)],
     execute: (name, args) => name === "search_memory" || name === "get_memory_entry"
       ? executeMemoryTool(repo, persona, name, args)
-      : tools.execute(name, args),
-    maxToolCalls: 12,
-    maxRounds: 8,
+      : name === "inspect_build_environment"
+        ? executeBuildEnvironmentTool(name, repo, repo, false)
+        : tools.execute(name, args),
+    ...toolLoopLimits(),
   });
   const reply = response.text.trim();
   if (!reply) throw new Error(`${roster[persona].name} returned an empty response.`);

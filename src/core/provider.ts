@@ -2,7 +2,10 @@ export interface ModelRequest {
   systemPrompt: string;
   userPrompt: string;
   images?: Array<{ mimeType: "image/png" | "image/jpeg" | "image/webp"; data: string }>;
-  telemetry?: { recordCall: (usage: ModelUsage | undefined, durationMs: number) => void };
+  telemetry?: {
+    recordCall: (usage: ModelUsage | undefined, durationMs: number) => void;
+    recordToolLoop?: (diagnostics: ToolLoopDiagnostics) => void;
+  };
 }
 
 export interface ModelResponse {
@@ -14,6 +17,23 @@ export interface ModelUsage {
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+}
+
+export interface ToolCallTrace {
+  round: number;
+  name: string;
+  args: Record<string, unknown>;
+  durationMs?: number;
+  isError?: boolean;
+}
+
+export interface ToolLoopDiagnostics {
+  rounds: number;
+  toolCalls: number;
+  maxRounds: number;
+  maxToolCalls: number;
+  calls: ToolCallTrace[];
+  bottleneck?: string;
 }
 
 export function reportModelCall(request: ModelRequest, started: number, usage?: ModelUsage): void {

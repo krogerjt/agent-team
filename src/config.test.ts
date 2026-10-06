@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { toolLoopLimits } from "./config.js";
+
+test("tool loop limits have generous defaults and can be overridden", () => {
+  assert.deepEqual(toolLoopLimits({}), { maxToolCalls: 40, maxRounds: 24 });
+  assert.deepEqual(toolLoopLimits({ AGENT_TEAM_MAX_TOOL_CALLS: "55", AGENT_TEAM_MAX_MODEL_ROUNDS: "30" }), { maxToolCalls: 55, maxRounds: 30 });
+});
 import { resolveProviderConfig } from "./config.js";
 
 test("defaults to mock without credentials", () => {

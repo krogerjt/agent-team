@@ -32,17 +32,17 @@ function capture(executable: string, args: string[], input = "", timeoutMs = 30_
 }
 
 async function sshScript(host: RemoteBuildHost, script: string, timeoutMs = 30_000, maxOutput = LIMIT): Promise<{ code: number; output: string }> {
-  return capture("ssh", sshArgs(host, ["/bin/zsh", "-s"]), script, timeoutMs, maxOutput);
+  return capture("ssh", sshArgs(host, ["/bin/zsh", "-s"]), `export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"\n${script}`, timeoutMs, maxOutput);
 }
 
 function remotePaths(host: RemoteBuildHost, id: string): { root: string; job: string; source: string; cache: string } {
-  const root = `$HOME/${quote(host.root)}`;
+  const root = `"$HOME"/${quote(host.root)}`;
   return { root, job: `${root}/jobs/${id}`, source: `${root}/jobs/${id}/source`, cache: `${root}/cache` };
 }
 
 export type RemoteScriptRunner = (host: RemoteBuildHost, script: string, timeoutMs?: number, maxOutput?: number) => Promise<{ code: number; output: string }>;
 
-export async function testRemoteBuildHost(host: RemoteBuildHost, setupCommand = "", run: RemoteScriptRunner = sshScript): Promise<RemoteReadiness> {
+export async function testRemoteBuildHost(host: RemoteBuildHost, setupCommand = "", run: RemoteScriptRunner = sshScript, requiredTools: string[] = []): Promise<RemoteReadiness> {
   host = validateRemoteBuildHost(host);
   const items: RemoteReadinessItem[] = [];
   if (!host.target) return { ok: false, target: "", items: [{ name: "SSH target", ok: false, detail: "Enter a Mac SSH alias or user@host." }] };
@@ -54,6 +54,7 @@ printf 'MACOS\t'; sw_vers -productVersion 2>/dev/null || true
 printf 'XCODE\t'; xcodebuild -version 2>/dev/null | head -1 || true
 printf 'SIMULATORS\t'; xcrun simctl list devices available 2>/dev/null | grep -Ec 'iPhone|iPad|Apple TV|Apple Watch|Vision Pro' || true
 printf 'TAR\t'; command -v tar 2>/dev/null || true
+printf '\nXCODEGEN\t'; command -v xcodegen 2>/dev/null || true
 printf '\nPOD\t'; command -v pod 2>/dev/null || true
 printf 'BUNDLE\t'; command -v bundle 2>/dev/null || true
 printf '\nDISK\t'; df -Pk "$HOME" 2>/dev/null | tail -1 | awk '{print $4}'
@@ -66,6 +67,7 @@ printf '\nDISK\t'; df -Pk "$HOME" 2>/dev/null | tail -1 | awk '{print $4}'
   items.push({ name: "Full Xcode", ok: /^Xcode /.test(values.XCODE ?? ""), detail: values.XCODE || "Install and initialize full Xcode" });
   items.push({ name: "Simulator", ok: Number(values.SIMULATORS) > 0, detail: Number(values.SIMULATORS) > 0 ? `${values.SIMULATORS} available devices` : "Install an Apple simulator runtime" });
   items.push({ name: "Archive tool", ok: Boolean(values.TAR), detail: values.TAR || "tar was not found" });
+  if (requiredTools.includes("xcodegen")) items.push({ name: "XcodeGen", ok: Boolean(values.XCODEGEN), detail: values.XCODEGEN || "Install XcodeGen on the Mac (brew install xcodegen) and make it available to SSH builds." });
   items.push({ name: "Agent Team Build Keychain", ok: true, detail: "Exists, unlocked, and readable" });
   if (/\bpod(?:\s|$)/.test(setupCommand)) items.push({ name: "CocoaPods", ok: Boolean(values.POD), detail: values.POD || "Install CocoaPods on the Mac" });
   if (/\bbundle(?:\s|$)/.test(setupCommand)) items.push({ name: "Bundler", ok: Boolean(values.BUNDLE), detail: values.BUNDLE || "Install Bundler on the Mac" });
@@ -130,7 +132,7 @@ export async function runRemoteChecks(root: string, commands: CheckCommand[], co
   const host = await readRemoteBuildHost();
   if (!host.enabled || !host.target) return commands.map((command) => ({ name: command.name, status: "missing", required: true, output: "Configure and enable a Mac Build Host in Workshop Options." }));
   const project = await readRemoteProjectSettings(context?.repo ?? root);
-  const ready = await testRemoteBuildHost(host, project.setupCommand);
+  const ready = await testRemoteBuildHost(host, project.setupCommand, undefined, commands.map((command) => command.executable));
   if (!ready.ok) return commands.map((command) => ({ name: command.name, status: "missing", required: true, executor: host.target, output: `Mac Build Host is not ready: ${ready.items.filter((item) => !item.ok).map((item) => `${item.name}: ${item.detail}`).join("; ")}` }));
   const id = randomUUID().replaceAll("-", "");
   const paths = remotePaths(host, id);
@@ -155,13 +157,14 @@ export async function runRemoteChecks(root: string, commands: CheckCommand[], co
       }
       const isTest = args.includes("test");
       const remoteResult = `${paths.job}/result-${index}.xcresult`;
+      let buildPaths = "";
       if (command.executable === "xcodebuild") {
-        args.push("-derivedDataPath", `${paths.cache}/DerivedData`);
-        if (isTest) args.push("-resultBundlePath", remoteResult);
+        // These paths are shell expressions rooted in the remote HOME, not literal argv strings.
+        buildPaths = ` -derivedDataPath ${paths.cache}/DerivedData${isTest ? ` -resultBundlePath ${remoteResult}` : ""}`;
       }
       const exports = secretEntries.map(([variable, name]) => `export ${variable}="$(${keychainSecretLookup(name)})" || { printf '%s\\n' ${quote(`Mac Build Keychain secret '${name}' is unavailable.`)} >&2; exit 23; }`).join("\n");
       const redactions = secretEntries.map(([variable]) => keychainRedactionScript(variable)).join(" | ");
-      const script = `${buildKeychainShell()}\nset -o pipefail\n${exports}\ncd ${paths.source}\noutput=$(mktemp)\ntrap 'rm -f "$output"' EXIT\nset +e\n${quote(command.executable)} ${args.map(quote).join(" ")} >"$output" 2>&1\ncode=$?\nset -e\n${redactions ? `${redactions} "$output"` : `cat "$output"`}\nprintf '\\n'\nexit "$code"\n`;
+      const script = `${buildKeychainShell()}\nset -o pipefail\n${exports}\ncd ${paths.source}\noutput=$(mktemp)\ntrap 'rm -f "$output"' EXIT\nset +e\n${quote(command.executable)} ${args.map(quote).join(" ")}${buildPaths} >"$output" 2>&1\ncode=$?\nset -e\n${redactions ? `${redactions} "$output"` : `cat "$output"`}\nif [ "$code" -ne 0 ]; then\n  printf '\\nBuild diagnostics:\\n'\n  { grep -E 'error:|fatal error:|BUILD FAILED' "$output" | tail -40 || true; }${redactions ? ` | ${redactions}` : ""}\nfi\nprintf '\\n'\nexit "$code"\n`;
       const execution = await sshScript(host, script, command.timeoutMs ?? 600_000);
       const result: CheckResult = { name: command.name, status: execution.code === 0 ? "passed" : "failed", required: true, executor: host.target, output: execution.output.slice(-LIMIT) };
       if (isTest) {
@@ -183,6 +186,7 @@ export async function runRemoteChecks(root: string, commands: CheckCommand[], co
         }
       }
       results.push(result);
+      if (command.executable === "xcodegen" && result.status !== "passed") break;
     }
   } catch (error) {
     return commands.map((command) => ({ name: command.name, status: "failed", required: true, executor: host.target, output: error instanceof Error ? error.message : String(error) }));

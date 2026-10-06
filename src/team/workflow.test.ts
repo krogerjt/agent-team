@@ -69,6 +69,9 @@ test("six personas move dependent tasks through separate worktrees and wait for 
     async generate(): Promise<ModelResponse> { return { text: "unused" }; },
     async generateWithTools(request: ToolRequest): Promise<ToolResponse> {
       assert.equal(request.tools.some((tool) => tool.name === "apply_patch"), false);
+      assert.equal(request.tools.some((tool) => tool.name === "inspect_build_environment"), true);
+      assert.equal(request.tools.some((tool) => tool.name === "run_checks"), false);
+      assert.equal(request.tools.some((tool) => tool.name === "create_png"), false);
       return { text: "The note changed.", toolCalls: 0 };
     },
   });

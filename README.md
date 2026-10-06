@@ -44,11 +44,13 @@ npm run code -- --repo C:\path\to\your\repo --task "Make a small, specific code 
 
 The coding command requires a clean Git repository with a commit. It creates a sibling worktree on a `codex/` branch, lets Researcher inspect, Lead patch, and Reviewer assess the diff and checks. It leaves the worktree and its uncommitted changes in place for you to inspect. The command never commits, pushes, or deletes the worktree.
 
-Automatic checks include Node `test` and `typecheck` scripts, one root .NET solution or project, Python pytest or unittest discovery, and tracked Xcode projects or workspaces. For Xcode, the runner prefers a single workspace, discovers shared schemes, infers the Apple platform from the project, and runs an unsigned simulator or macOS build. When a shared scheme contains test targets, it also selects an available simulator and runs the scheme's tests. Xcode checks are reported as unavailable unless the host is macOS with full Xcode installed. For Node repositories with a lockfile, the runner uses `npm ci --ignore-scripts` in the worktree before checks. A missing tool or undetected check is reported, not counted as a pass. Model tool use is limited to repository file listing, reading, literal search, and exact text patches; it cannot ask the runner to execute arbitrary commands.
+Automatic checks include Node `test` and `typecheck` scripts, one root .NET solution or project, Python pytest or unittest discovery, and tracked Xcode projects or workspaces. For Xcode, the runner prefers a single workspace, discovers shared schemes, infers the Apple platform from the project, and runs an unsigned simulator or macOS build. When a shared scheme contains test targets, it also selects an available simulator and runs the scheme's tests. Apple checks use full Xcode locally on macOS or the configured Mac Build Host on Windows. For Node repositories with a lockfile, the runner uses `npm ci --ignore-scripts` in the worktree before checks. A missing tool or undetected check is reported, not counted as a pass. Model tools support repository file listing, reading, literal search, exact text patches, image inspection and PNG creation; team workers can request detected checks but cannot submit arbitrary shell commands.
 
 The runner removes credential-like environment variables, including API keys, before starting repository checks. Checks are still code supplied by the selected repository, so choose repositories you trust.
 
 ### Use a Mac as a remote Xcode builder
+
+Root XcodeGen specs (`project.yml` or `project.yaml`) with declared application targets/shared schemes are detected even before a project has been generated. The runner generates the project on the Mac, then builds and runs declared simulator tests. Install XcodeGen on the Mac when needed (`brew install xcodegen`); SSH builds include standard Homebrew paths on Intel and Apple Silicon Macs.
 
 The Windows workshop can send Apple checks to a Mac without keeping repository clones there. On the Mac, install and initialize full Xcode, install a simulator runtime, enable **Remote Login**, and add your Windows SSH public key. Confirm that `ssh user@mac-host` works from Windows without a password prompt.
 
@@ -65,6 +67,14 @@ AGENT_TEAM_MAC_KEYCHAIN_PASSWORD='use-your-local-build-keychain-password'
 The Mac Build Host test checks that this dedicated **Agent Team Build Keychain** exists, unlocks it over SSH, and can read it. It reports a missing Keychain or password configuration with the required initialization step. The helper locks it again after 15 minutes. Do not commit the Keychain or the configuration file. The normal macOS login Keychain is not changed.
 
 The same panel stores a per-repository preparation command such as `bundle exec pod install` and maps environment variables to secrets in the Agent Team Build Keychain. Secret values travel over SSH only while being saved; build commands resolve them on the Mac, and only mapping names remain in Windows settings. Keep the Mac powered, awake, and reachable while goals are running.
+
+Agents can use `inspect_build_environment` in desk chats and runs to inspect repository checks and Mac readiness. Workers also get `run_checks` during implementation to verify their exact worktree using the host's existing check runner. Required checks that are unavailable automatically go to Piper for environment diagnosis, which is recorded in the blocked task and Piper's journal. Piper reports the setup required in Workshop Options; OS permissions and secret values are still configured through the existing UI or on the Mac. A green readiness test is not a successful project build.
+
+### PNG artwork and app icons
+
+Workers have `create_png` to render an existing SVG, PNG, JPEG or WebP into an opaque PNG using Sharp locally on Windows or macOS. They can create new SVG artwork with `apply_patch`, then render it. For Apple app icons, use 1024×1024 dimensions and an opaque `#RRGGBB` background; conversion preserves aspect ratio with padding and removes the alpha channel. The tool validates format, dimensions and opacity before saving inside the worktree. `inspect_image` lets workers and reviewers inspect binary asset metadata. Asset catalog references still need to be patched to the PNG filename. SVGs must be self-contained; internal gradient references are supported, external resources are rejected.
+
+For new AI artwork, `generate_png` calls the OpenAI Image API and saves an opaque 1024×1024 PNG. Configure `OPENAI_API_KEY` and `AGENT_TEAM_IMAGE_MODEL` in the host's local `.env` with a supported GPT Image model available to your account. Image generation incurs API charges; SVG conversion requires neither credentials nor an image model. Desk chats remain read-only and cannot generate or write assets. Restart the workshop after updating tools, then resume the blocked goal so Wren receives the new capabilities.
 
 ## Seven-person team
 

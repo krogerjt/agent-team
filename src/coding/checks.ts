@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { git } from "./git.js";
 import { runRemoteChecks } from "../remote/executor.js";
 import { selectSimulatorDestination } from "./apple.js";
+import { parse as parseYaml } from "yaml";
 export { selectSimulatorDestination } from "./apple.js";
 
 const execFileAsync = promisify(execFile);
@@ -86,7 +87,7 @@ function xcodeContainer(files: string[]): { flag: "-workspace" | "-project"; fil
 async function detectXcodeChecks(root: string): Promise<CheckCommand[]> {
   const files = (await git(root, ["ls-files"])).split(/\r?\n/).filter(Boolean);
   const container = xcodeContainer(files);
-  if (!container) return [];
+  if (!container) return detectXcodeGenChecks(root);
   const sharedSchemes = files.filter((file) => /xcshareddata\/xcschemes\/[^/]+\.xcscheme$/.test(file));
   let schemes = [...new Set(sharedSchemes.map((file) => path.basename(file, ".xcscheme")))];
   if (schemes.length === 0) schemes = [path.basename(container.file).replace(/\.(?:xcworkspace|xcodeproj)$/, "")];
@@ -110,6 +111,26 @@ async function detectXcodeChecks(root: string): Promise<CheckCommand[]> {
       args: [...base, "-destination", "{available-simulator}", "test", "CODE_SIGNING_ALLOWED=NO"],
       platform: "darwin", timeoutMs: 600_000, simulatorPlatform: sdk.replace(/ Simulator$/, ""),
     });
+  }
+  return commands;
+}
+
+async function detectXcodeGenChecks(root: string): Promise<CheckCommand[]> {
+  // XcodeGen's default spec is project.yml; accept the common .yaml spelling too.
+  const spec = await exists(path.join(root, "project.yml")) ? "project.yml" : await exists(path.join(root, "project.yaml")) ? "project.yaml" : undefined;
+  if (!spec) return [];
+  const parsed = parseYaml(await readFile(path.join(root, spec), "utf8")) as { name?: string; targets?: Record<string, { platform?: string; type?: string }>; schemes?: Record<string, { build?: { targets?: Record<string, unknown> }; test?: { targets?: unknown[] } }> } | null;
+  if (!parsed?.name || !/^[A-Za-z0-9_. -]+$/.test(parsed.name) || !parsed.targets) return [];
+  const commands: CheckCommand[] = [{ name: "XcodeGen project generation", executable: "xcodegen", args: ["generate", "--spec", spec], platform: "darwin", timeoutMs: 120_000 }];
+  const schemes = parsed.schemes ?? Object.fromEntries(Object.entries(parsed.targets).filter(([, target]) => target.type === "application").map(([name]) => [name, { build: { targets: { [name]: "all" } } }]));
+  for (const [scheme, settings] of Object.entries(schemes)) {
+    const targets = Object.keys(settings.build?.targets ?? {});
+    const platform = targets.map((target) => parsed.targets![target]?.platform).find(Boolean);
+    const sdk = ({ iOS: "iOS Simulator", tvOS: "tvOS Simulator", watchOS: "watchOS Simulator", visionOS: "visionOS Simulator", macOS: "macOS" } as Record<string, string>)[platform ?? ""];
+    if (!sdk) continue;
+    const base = ["-project", `${parsed.name}.xcodeproj`, "-scheme", scheme];
+    commands.push({ name: `xcodebuild ${scheme} (${sdk})`, executable: "xcodebuild", args: [...base, "-destination", `generic/platform=${sdk}`, "build", "CODE_SIGNING_ALLOWED=NO"], platform: "darwin", timeoutMs: 600_000 });
+    if (sdk.endsWith("Simulator") && settings.test?.targets?.length) commands.push({ name: `xcodebuild ${scheme} tests (${sdk})`, executable: "xcodebuild", args: [...base, "-destination", "{available-simulator}", "test", "CODE_SIGNING_ALLOWED=NO"], platform: "darwin", timeoutMs: 600_000, simulatorPlatform: sdk.replace(/ Simulator$/, "") });
   }
   return commands;
 }

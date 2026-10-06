@@ -38,3 +38,10 @@ test("secret lookup is explicit and output redaction uses the Mac-side environme
   assert.doesNotMatch(lookup, /login\.keychain/);
   assert.match(keychainRedactionScript("API_TOKEN"), /ENV\{API_TOKEN\}/);
 });
+
+test("XcodeGen readiness identifies a missing generator only when the project needs it", async () => {
+  const run: RemoteScriptRunner = async (_host, script) => ({ code: 0, output: script.includes("sw_vers") ? healthyMac : "KEYCHAIN\tunlocked\n" });
+  const result = await testRemoteBuildHost(host, "", run, ["xcodegen"]);
+  assert.equal(result.ok, false);
+  assert.match(result.items.find((item) => item.name === "XcodeGen")!.detail, /brew install xcodegen/);
+});

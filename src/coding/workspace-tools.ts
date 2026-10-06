@@ -4,6 +4,8 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { git } from "./git.js";
 import type { ToolDefinition, ToolResult } from "../core/provider.js";
+import sharp from "sharp";
+import OpenAI from "openai";
 
 export type ToolMode = "researcher" | "lead";
 const FILE_LIMIT = 20_000;
@@ -26,6 +28,24 @@ const patchTool: ToolDefinition = {
   parameters: schema({ path: { type: "string" }, oldText: { type: "string" }, newText: { type: "string" } }, ["path", "oldText", "newText"]),
 };
 
+const pngTool: ToolDefinition = {
+  name: "create_png",
+  description: "Render an existing repository SVG, PNG, JPEG or WebP into an opaque PNG. Use apply_patch to create an SVG first for new artwork. Preserves aspect ratio with padding, removes alpha, validates the output. For an Apple app icon use width=1024, height=1024 and a solid background such as #FFFFFF. Writes only inside this worktree; update the asset catalog separately.",
+  parameters: schema({ source: { type: "string" }, path: { type: "string" }, width: { type: "integer", minimum: 1, maximum: 4096 }, height: { type: "integer", minimum: 1, maximum: 4096 }, background: { type: "string", description: "Opaque #RRGGBB background." } }, ["source", "path", "width", "height", "background"]),
+};
+
+const inspectImageTool: ToolDefinition = {
+  name: "inspect_image",
+  description: "Inspect a repository image's format, dimensions and alpha channel without reading binary data as text.",
+  parameters: schema({ path: { type: "string" } }, ["path"]),
+};
+
+const generateImageTool: ToolDefinition = {
+  name: "generate_png",
+  description: "Create new artwork from a text prompt using the OpenAI Image API (billed API call). Requires OPENAI_API_KEY and AGENT_TEAM_IMAGE_MODEL configured on the host. Saves a validated opaque 1024×1024 PNG. For an existing SVG/icon use create_png instead to preserve its design without an API call.",
+  parameters: schema({ prompt: { type: "string" }, path: { type: "string" }, background: { type: "string", description: "Opaque #RRGGBB background." } }, ["prompt", "path", "background"]),
+};
+
 function stringArg(args: Record<string, unknown>, name: string): string {
   if (typeof args[name] !== "string") throw new Error(`${name} must be a string.`);
   return args[name];
@@ -35,8 +55,8 @@ export class WorkspaceTools {
   readonly definitions: ToolDefinition[];
   private readonly created = new Set<string>();
 
-  constructor(private readonly root: string, private readonly mode: ToolMode) {
-    this.definitions = mode === "lead" ? [...readTools, patchTool] : [...readTools];
+  constructor(readonly root: string, private readonly mode: ToolMode) {
+    this.definitions = mode === "lead" ? [...readTools, inspectImageTool, patchTool, pngTool, generateImageTool] : [...readTools, inspectImageTool];
   }
 
   private async fileList(): Promise<string[]> {
@@ -87,6 +107,64 @@ export class WorkspaceTools {
   }
 
   async execute(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+    if (name === "generate_png" && this.mode === "lead") {
+      const target = await this.safePath(stringArg(args, "path"));
+      if (!/\.png$/i.test(target.normalized)) throw new Error("Output path must end in .png.");
+      if (await this.isIgnored(target.normalized)) throw new Error("Cannot write a Git-ignored file.");
+      const background = stringArg(args, "background");
+      if (!/^#[0-9a-f]{6}$/i.test(background)) throw new Error("Background must be an opaque #RRGGBB colour.");
+      const prompt = stringArg(args, "prompt").trim();
+      if (!prompt || prompt.length > 8_000) throw new Error("Prompt must contain 1–8,000 characters.");
+      if (!process.env.OPENAI_API_KEY || !process.env.AGENT_TEAM_IMAGE_MODEL) throw new Error("Configure OPENAI_API_KEY and AGENT_TEAM_IMAGE_MODEL on the host for image generation. For existing artwork use create_png, which needs no API credentials.");
+      const client = new OpenAI({ timeout: 180_000, maxRetries: 0 });
+      const response = await client.images.generate({ model: process.env.AGENT_TEAM_IMAGE_MODEL, prompt, n: 1, size: "1024x1024", output_format: "png", background: "opaque" });
+      const data = response.data?.[0]?.b64_json;
+      if (!data || data.length > 30_000_000) throw new Error("Image service did not return a usable PNG.");
+      const output = await sharp(Buffer.from(data, "base64"), { limitInputPixels: 16_777_216 })
+        .resize(1024, 1024, { fit: "contain", background }).flatten({ background }).removeAlpha().png().toBuffer();
+      const metadata = await sharp(output).metadata();
+      if (metadata.format !== "png" || metadata.width !== 1024 || metadata.height !== 1024 || metadata.hasAlpha) throw new Error("Generated PNG validation failed.");
+      await mkdir(path.dirname(target.absolute), { recursive: true });
+      await writeFile(target.absolute, output);
+      this.created.add(target.normalized);
+      return { content: `Generated ${target.normalized}: PNG 1024×1024, opaque, no alpha channel. Image model: ${process.env.AGENT_TEAM_IMAGE_MODEL}.` };
+    }
+    if (name === "inspect_image") {
+      const { absolute } = await this.allowed(stringArg(args, "path"));
+      if ((await lstat(absolute)).size > 10_000_000) throw new Error("Image exceeds 10 MB.");
+      const metadata = await sharp(await readFile(absolute), { limitInputPixels: 16_777_216 }).metadata();
+      return { content: JSON.stringify({ format: metadata.format, width: metadata.width, height: metadata.height, hasAlpha: metadata.hasAlpha }) };
+    }
+    if (name === "create_png" && this.mode === "lead") {
+      const source = await this.allowed(stringArg(args, "source"));
+      const target = await this.safePath(stringArg(args, "path"));
+      if (!/\.png$/i.test(target.normalized)) throw new Error("Output path must end in .png.");
+      if (source.absolute.toLowerCase() === target.absolute.toLowerCase()) throw new Error("Use a separate output path to preserve the source.");
+      if (await this.isIgnored(target.normalized)) throw new Error("Cannot write a Git-ignored file.");
+      const { width, height } = args;
+      if (!Number.isInteger(width) || !Number.isInteger(height) || Number(width) < 1 || Number(height) < 1 || Number(width) > 4096 || Number(height) > 4096) throw new Error("Dimensions must be integers from 1 to 4096.");
+      const background = stringArg(args, "background");
+      if (!/^#[0-9a-f]{6}$/i.test(background)) throw new Error("Background must be an opaque #RRGGBB colour.");
+      if ((await lstat(source.absolute)).size > 10_000_000) throw new Error("Image exceeds 10 MB.");
+      const bytes = await readFile(source.absolute);
+      const metadata = await sharp(bytes, { limitInputPixels: 16_777_216 }).metadata();
+      if (!["svg", "png", "jpeg", "webp"].includes(metadata.format ?? "")) throw new Error("Use SVG, PNG, JPEG or WebP input.");
+      // Reject SVG resource references: conversion must not read outside the repository or fetch URLs.
+      if (metadata.format === "svg") {
+        const svg = bytes.toString("utf8");
+        const references = [...svg.matchAll(/\b(?:href|src)\s*=\s*(["'])(.*?)\1|\burl\s*\(\s*([^)]*)\)/gi)];
+        if (/<!DOCTYPE|<!ENTITY|@import/i.test(svg) || references.some((match) => !(match[2] ?? match[3] ?? "").trim().replace(/^["']|["']$/g, "").startsWith("#"))) throw new Error("SVG must be self-contained, without external resource references.");
+      }
+      const output = await sharp(bytes, { limitInputPixels: 16_777_216 })
+        .resize(Number(width), Number(height), { fit: "contain", background })
+        .flatten({ background }).removeAlpha().png().toBuffer();
+      const result = await sharp(output).metadata();
+      if (result.format !== "png" || result.width !== width || result.height !== height || result.hasAlpha) throw new Error("PNG validation failed.");
+      await mkdir(path.dirname(target.absolute), { recursive: true });
+      await writeFile(target.absolute, output);
+      this.created.add(target.normalized);
+      return { content: `Created ${target.normalized}: PNG ${result.width}×${result.height}, opaque, no alpha channel (${output.length} bytes).` };
+    }
     if (name === "list_files") {
       const files = await this.fileList();
       return { content: `${files.slice(0, 300).join("\n")}${files.length > 300 ? `\n... ${files.length - 300} more files` : ""}` };

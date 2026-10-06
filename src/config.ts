@@ -9,6 +9,20 @@ export type Role = "lead" | "researcher" | "reviewer" | PersonaId;
 export type ProviderName = "mock" | "openai" | "anthropic" | "bedrock";
 type Environment = NodeJS.ProcessEnv;
 
+function positiveLimit(value: string | undefined, fallback: number, label: string): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 1_000) throw new Error(`${label} must be an integer from 1 to 1,000.`);
+  return parsed;
+}
+
+export function toolLoopLimits(env: Environment = process.env): { maxToolCalls: number; maxRounds: number } {
+  return {
+    maxToolCalls: positiveLimit(env.AGENT_TEAM_MAX_TOOL_CALLS, 40, "AGENT_TEAM_MAX_TOOL_CALLS"),
+    maxRounds: positiveLimit(env.AGENT_TEAM_MAX_MODEL_ROUNDS, 24, "AGENT_TEAM_MAX_MODEL_ROUNDS"),
+  };
+}
+
 const legacyRole: Partial<Record<Role, string>> = {
   marlow: "LEAD",
   juniper: "RESEARCHER",

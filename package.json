@@ -16,7 +16,9 @@
     "@aws-sdk/client-bedrock-runtime": "^3.1146.0",
     "dotenv": "^18.0.5",
     "openai": "^7.28.0",
-    "playwright-core": "^1.63.0"
+    "playwright-core": "^1.63.0",
+    "sharp": "^0.35.5",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@types/node": "^26.6.4",

@@ -99,7 +99,7 @@ async function readRunEvents(runDir: string, limit = 200): Promise<RunEvent[]> {
 }
 
 async function hasAppleProject(repo: string): Promise<boolean> {
-  return (await git(repo, ["ls-files"])).split(/\r?\n/).some((file) => /(?:\.xcodeproj\/project\.pbxproj|\.xcworkspace\/contents\.xcworkspacedata)$/.test(file));
+  return (await detectChecks(repo)).some((command) => command.platform === "darwin");
 }
 
 function launch(repo: string, work: () => Promise<TeamRunState>, initialRunId?: string): string {

@@ -1,4 +1,5 @@
 import type { ModelProvider, ModelRequest, ModelResponse, ToolCapableProvider, ToolRequest, ToolResponse } from "../core/provider.js";
+import type { ToolLoopDiagnostics } from "../core/provider.js";
 import { recordPersonaUsage, type PersonaUsageSample } from "./persona-store.js";
 import type { PersonaId } from "../personas/roster.js";
 import type { ProviderName } from "../config.js";
@@ -6,7 +7,16 @@ import type { ProviderName } from "../config.js";
 type Identity = { provider: ProviderName; model?: string };
 
 function trackedRequest<T extends ModelRequest>(request: T, calls: PersonaUsageSample["calls"]): T {
-  return { ...request, telemetry: { recordCall: (usage, durationMs) => calls.push({ usage, durationMs }) } };
+  return { ...request, telemetry: {
+    ...request.telemetry,
+    recordCall: (usage, durationMs) => calls.push({ usage, durationMs }),
+  } };
+}
+
+export function readToolLoopDiagnostics(error: unknown): ToolLoopDiagnostics | undefined {
+  if (!(error instanceof Error)) return undefined;
+  const diagnostics = (error as Error & { diagnostics?: ToolLoopDiagnostics }).diagnostics;
+  return diagnostics?.calls ? diagnostics : undefined;
 }
 
 async function persist(repo: string, persona: PersonaId, identity: Identity, started: number, calls: PersonaUsageSample["calls"], response: { usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number }; toolCalls?: number }, failed: boolean): Promise<void> {
