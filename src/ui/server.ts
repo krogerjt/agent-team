@@ -15,6 +15,7 @@ import { livePreview, stopAllPreviews, stopPreview } from "../preview/runtime.js
 import { readCookbook } from "../preview/cookbook.js";
 import { runPerformanceReview } from "../team/performance-review.js";
 import { recentRepositories, rememberRepository, resolveRepository } from "./repositories.js";
+import { branchInfo, createBranch, pullFromRemote, pushToRemote, switchBranch } from "../team/git-remote.js";
 import { commitLocalChanges, finishRunUpdate, mergeReadiness, repositoryGitStatus, resolveRunConflict, updateRunToLatest } from "../team/git-actions.js";
 import { readRemoteBuildHost, readRemoteProjectSettings, saveRemoteBuildHost, saveRemoteProjectSettings, suggestedSetupCommand, type RemoteBuildHost, type RemoteProjectSettings } from "../remote/settings.js";
 import { saveRemoteKeychainSecret, testRemoteBuildHost } from "../remote/executor.js";
@@ -140,7 +141,19 @@ async function serve(req: IncomingMessage, res: ServerResponse, workspace: { rep
     } finally { switchingRepository = false; }
   }
   const repo = workspace.repo;
-  if (method === "GET" && url.pathname === "/api/git/status") { json(res, 200, await repositoryGitStatus(repo)); return; }
+  if (method === "GET" && url.pathname === "/api/git/status") { json(res, 200, { ...await repositoryGitStatus(repo), branches: await branchInfo(repo) }); return; }
+  if (method === "POST" && ["/api/git/pull", "/api/git/push", "/api/git/switch", "/api/git/create-branch"].includes(url.pathname)) {
+    assertRepositoryIdle(repo);
+    const result = await gitAction(repo, async () => {
+      const input = await body(req);
+      const head = string(input.head, "the reviewed commit", 64);
+      if (url.pathname === "/api/git/pull") return { message: await pullFromRemote(repo, head) };
+      if (url.pathname === "/api/git/push") return { message: await pushToRemote(repo, head) };
+      if (url.pathname === "/api/git/switch") return { branches: await switchBranch(repo, string(input.branch, "a branch", 300), head) };
+      return { branches: await createBranch(repo, string(input.branch, "a branch name", 300), head) };
+    });
+    json(res, 200, result); return;
+  }
   if (method === "POST" && url.pathname === "/api/git/commit") {
     assertRepositoryIdle(repo);
     const status = await gitAction(repo, async () => {

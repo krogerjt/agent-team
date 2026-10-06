@@ -5,9 +5,9 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-export async function git(cwd: string, args: string[]): Promise<string> {
+export async function git(cwd: string, args: string[], options: { timeout?: number } = {}): Promise<string> {
   try {
-    const { stdout } = await execFileAsync("git", args, { cwd, maxBuffer: 4_000_000, windowsHide: true });
+    const { stdout } = await execFileAsync("git", args, { cwd, maxBuffer: 4_000_000, windowsHide: true, timeout: options.timeout, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
     return stdout.trimEnd();
   } catch (error) {
     const detail = error && typeof error === "object" && "stderr" in error ? String(error.stderr).trim() : String(error);

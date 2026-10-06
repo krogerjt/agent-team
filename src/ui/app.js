@@ -421,12 +421,23 @@ async function openOptions() {
   document.body.append(modal); renderSecretMappings();
 }
 
+function gitBranchMarkup(status, busy) {
+  const info = status.branches;
+  const disabled = busy ? "disabled" : "";
+  const dirty = status.changes.some((change) => change.status !== "??");
+  const option = (name, selected) => `<option value="${escapeHtml(name)}" ${selected ? "selected" : ""}>${escapeHtml(name)}</option>`;
+  const sync = info.detached ? "HEAD is detached. Create or switch to a branch to push or pull." : info.upstream ? `Tracking ${escapeHtml(info.upstream)} · ${info.ahead} to push · ${info.behind} to pull (as of the last fetch)` : "This branch is not on a remote yet. Push to publish it.";
+  const noPull = busy || info.detached || !info.upstream;
+  const noPush = busy || info.detached || Boolean(info.upstream && !info.ahead);
+  return `<div class="git-remote"><div class="git-branch-row"><label class="git-branch-picker">Branch<select id="git-branch-select" data-head="${escapeHtml(status.head)}" ${disabled || dirty ? "disabled" : ""}>${info.detached ? `<option value="" selected disabled>(detached HEAD)</option>` : ""}<optgroup label="Local branches">${info.local.map((name) => option(name, name === info.current)).join("")}</optgroup>${info.remote.length ? `<optgroup label="Remote branches">${info.remote.map((name) => option(name, false)).join("")}</optgroup>` : ""}</select></label><form id="git-branch-form" class="git-branch-form" data-head="${escapeHtml(status.head)}"><input name="branch" maxlength="200" placeholder="new-branch-name" aria-label="New branch name" autocomplete="off" required><button class="secondary-button" ${disabled}>+ New branch</button></form></div>${dirty ? `<p class="git-hint">Save your local changes to switch branches. A new branch can be created with changes in progress; they come with you.</p>` : ""}<p class="git-location">${sync}</p><div class="git-sync-actions"><button class="secondary-button" id="git-pull" data-head="${escapeHtml(status.head)}" ${noPull ? "disabled" : ""}>↓ Pull</button><button class="secondary-button" id="git-push" data-head="${escapeHtml(status.head)}" ${noPush ? "disabled" : ""}>↑ Push</button></div></div>`;
+}
+
 function gitRecoveryMarkup(status, readiness, run) {
   const busy = Object.values(state.jobs).some((job) => job.status === "running");
   const disabled = busy ? "disabled" : "";
   const reasons = readiness?.reasons || [];
   const checks = run?.integration?.checks || run?.integrationChecks || [];
-  return `<div class="git-status-head"><div><span class="eyebrow">GIT WORKSPACE</span><h3>${readiness ? readiness.canMerge ? "Ready to merge" : "Let's clear the merge blockers" : "Save your local work"}</h3></div><button class="secondary-button" id="git-refresh">Refresh Git status</button></div><p class="git-location">Branch <strong>${escapeHtml(status.branch)}</strong> · commit ${escapeHtml(status.head.slice(0, 8))}</p>${reasons.length ? `<ul class="git-blockers">${reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>` : ""}${busy ? `<p class="git-blockers">Wait for the current work to finish before using Git actions.</p>` : ""}
+  return `<div class="git-status-head"><div><span class="eyebrow">GIT WORKSPACE</span><h3>${readiness ? readiness.canMerge ? "Ready to merge" : "Let's clear the merge blockers" : "Save your local work"}</h3></div><button class="secondary-button" id="git-refresh">Refresh Git status</button></div><p class="git-location">Branch <strong>${escapeHtml(status.branch)}</strong> · commit ${escapeHtml(status.head.slice(0, 8))}</p>${status.branches ? gitBranchMarkup(status, busy) : ""}${reasons.length ? `<ul class="git-blockers">${reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>` : ""}${busy ? `<p class="git-blockers">Wait for the current work to finish before using Git actions.</p>` : ""}
     ${status.changes.length ? `<details class="git-local-changes" open><summary>${status.changes.length} local file changes</summary><form id="git-commit-form" data-head="${escapeHtml(status.head)}"><p>Select the files to save in a local commit. This commits on ${escapeHtml(status.branch)}.</p><div class="git-files">${status.changes.map((file) => { const secret = /(^|[\\/])\.env(?:\.|$)/.test(file.path) && !file.path.endsWith(".env.example"); return `<label><input type="checkbox" name="files" value="${escapeHtml(file.path)}" ${secret ? "disabled" : "checked"}><code>${escapeHtml(file.status)} ${escapeHtml(file.path)}</code>${secret ? " · kept local" : ""}</label>`; }).join("")}</div>${status.diff ? `<details><summary>Review local changes</summary><pre class="diff">${escapeHtml(status.diff)}</pre></details>` : ""}<label class="git-message">Commit message<input name="message" maxlength="500" placeholder="Describe the changes you're saving" required></label><button class="primary-button" ${disabled}>Save selected files as a commit</button></form></details>` : `<p class="git-clean">✓ Your repository has no unsaved changes.</p>`}
     ${run?.status === "awaiting-review" && readiness?.stale && !run.integration ? `<div class="git-next-step"><p>Update this run in a new worktree using your current repository commit. Both versions are kept for review, and detected checks run again.</p><button class="secondary-button" id="git-update-run" ${busy || status.changes.length || readiness.stagingDirty ? "disabled" : ""}>Update run to latest code</button></div>` : ""}
     ${run?.integration ? `<div class="git-next-step"><p>Update worktree: <code>${escapeHtml(readiness.integrationPath)}</code></p>${readiness.conflicts.map((conflict) => `<details class="git-conflict"><summary>Conflict: ${escapeHtml(conflict.path)}</summary><p>Choose one whole file version, or edit the combined file in the update worktree and stage your resolution there.</p><div class="git-versions"><div><h4>Your repository version</h4><pre>${escapeHtml(conflict.current)}</pre><button class="secondary-button" data-conflict="${escapeHtml(conflict.path)}" data-choice="current" ${disabled}>Keep repository file</button></div><div><h4>Team version</h4><pre>${escapeHtml(conflict.team)}</pre><button class="secondary-button" data-conflict="${escapeHtml(conflict.path)}" data-choice="team" ${disabled}>Keep team file</button></div></div></details>`).join("")}<button class="primary-button" id="git-finish-update" ${busy || readiness.conflicts.length ? "disabled" : ""}>Finish update and rerun checks</button></div>` : ""}
@@ -439,7 +450,7 @@ async function openGitTools() {
     const status = await api("/api/git/status");
     $("#git-modal")?.remove();
     const modal = document.createElement("div"); modal.className = "modal-backdrop"; modal.id = "git-modal";
-    modal.innerHTML = `<div class="repo-modal" role="dialog" aria-modal="true" aria-label="Git tools"><div class="review-header"><div><span class="eyebrow">${escapeHtml(state.repo.split(/[\\/]/).pop())}</span><h2>Git tools</h2><p>Save changes and prepare this repository for the next goal.</p></div><button class="icon-button" data-close="git" aria-label="Close Git tools">✕</button></div><div class="repo-picker-body">${gitRecoveryMarkup(status)}</div></div>`;
+    modal.innerHTML = `<div class="repo-modal" role="dialog" aria-modal="true" aria-label="Git tools"><div class="review-header"><div><span class="eyebrow">${escapeHtml(state.repo.split(/[\\/]/).pop())}</span><h2>Git tools</h2><p>Switch branches, save changes, and sync this repository with its remote.</p></div><button class="icon-button" data-close="git" aria-label="Close Git tools">✕</button></div><div class="repo-picker-body">${gitRecoveryMarkup(status)}</div></div>`;
     document.body.append(modal);
   } catch (error) { notify(error.message, true); }
 }
@@ -496,6 +507,15 @@ document.addEventListener("click", async (event) => {
   }
   if (target.id === "git-tools-button") { await openGitTools(); return; }
   if (target.id === "git-refresh") { await refreshGitView(); return; }
+  if (target.id === "git-pull" || target.id === "git-push") {
+    const pulling = target.id === "git-pull";
+    target.disabled = true; target.textContent = pulling ? "Pulling…" : "Pushing…";
+    try {
+      const result = await api(pulling ? "/api/git/pull" : "/api/git/push", { method: "POST", body: JSON.stringify({ head: target.dataset.head }) });
+      await refreshGitView(); notify(pulling ? (result.message || "Pulled the latest changes.") : result.message === "Nothing to push." ? result.message : "Pushed to the remote repository.");
+    } catch (error) { await refreshGitView(); notify(error.message, true); }
+    return;
+  }
   if (["git-update-run", "git-finish-update", "git-review-preview"].includes(target.id)) {
     target.disabled = true;
     const runId = currentRun()?.id;
@@ -540,9 +560,17 @@ document.addEventListener("click", async (event) => {
   }
 });
 
+document.addEventListener("change", async (event) => {
+  const select = event.target;
+  if (select.id !== "git-branch-select" || !select.value) return;
+  select.disabled = true;
+  try { await api("/api/git/switch", { method: "POST", body: JSON.stringify({ head: select.dataset.head, branch: select.value }) }); await refreshGitView(); notify(`Switched to ${select.value}.`); }
+  catch (error) { await refreshGitView(); notify(error.message, true); }
+});
+
 document.addEventListener("submit", async (event) => {
   const form = event.target;
-  if (!["goal-form", "answer-form", "answer-pop-form", "chat-form", "journal-form", "timeline-form", "model-form", "secret-form", "requested-secret-form", "repo-form", "git-commit-form", "mac-host-form", "mac-project-form", "mac-secret-form"].includes(form.id)) return;
+  if (!["goal-form", "answer-form", "answer-pop-form", "chat-form", "journal-form", "timeline-form", "model-form", "secret-form", "requested-secret-form", "repo-form", "git-commit-form", "git-branch-form", "mac-host-form", "mac-project-form", "mac-secret-form"].includes(form.id)) return;
   event.preventDefault();
   if (form.id === "goal-form") return submitGoal(form);
   if (form.id === "timeline-form") return loadTimeline(form);
@@ -564,6 +592,12 @@ document.addEventListener("submit", async (event) => {
       optionSecrets[variable] = name;
       await api("/api/options/mac-project", { method: "PUT", body: JSON.stringify({ setupCommand: new FormData($("#mac-project-form")).get("setupCommand"), secrets: optionSecrets }) });
       form.reset(); renderSecretMappings(); notify("Secret saved to the Agent Team Build Keychain and mapped to this repository."); return;
+    }
+    if (form.id === "git-branch-form") {
+      const branch = new FormData(form).get("branch")?.toString().trim() || "";
+      try { await api("/api/git/create-branch", { method: "POST", body: JSON.stringify({ head: form.dataset.head, branch }) }); await refreshGitView(); notify(`Created and switched to ${branch}.`); }
+      catch (error) { if (button) button.disabled = false; notify(error.message, true); }
+      return;
     }
     if (form.id === "git-commit-form") {
       const data = new FormData(form);

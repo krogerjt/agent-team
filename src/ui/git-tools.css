@@ -23,6 +23,16 @@
 .git-check.missing summary { color: #f5d6ae; }
 .git-recovery .diff, #git-modal .diff { max-height: 280px; }
 .git-recovery p, #git-modal p { overflow-wrap: anywhere; }
+.git-remote { border-top: 1px solid #464c69; border-bottom: 1px solid #464c69; padding: 14px 0; margin: 14px 0; }
+.git-branch-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; }
+.git-branch-picker { display: grid; gap: 6px; font-weight: 600; flex: 1 1 220px; min-width: 0; }
+.git-branch-picker select, .git-branch-form input { width: 100%; min-width: 0; border: 1px solid #566080; border-radius: 7px; padding: 10px 12px; background: #171e34; color: #eef0fa; font: inherit; }
+.git-branch-picker select:disabled { opacity: 0.6; }
+.git-branch-form { display: flex; gap: 8px; flex: 1 1 260px; min-width: 0; }
+.git-branch-form input { flex: 1 1 auto; }
+.git-branch-form button { flex: 0 0 auto; white-space: nowrap; }
+.git-sync-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.git-hint { color: #bfc5da; font-size: 12px; margin: 10px 0 0; }
 .primary-button:disabled, .secondary-button:disabled { cursor: default; }
 @media (max-width: 650px) {
   .git-toolbar { padding: 10px 18px 0; }
