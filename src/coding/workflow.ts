@@ -56,7 +56,7 @@ export async function runCodingTask(repoPath: string, task: string, providers: C
       `Task: ${task}\nResearcher's findings:\n${research.text}\nImplement the task now.`, leadTools);
     let changes = await diff(worktree.path);
     if (!changes) throw new Error("Lead made no changes.");
-    let checks = await runChecks(worktree.path);
+    let checks = await runChecks(worktree.path, { repo });
     const reviewer = requireToolProvider(providers.reviewer);
     const review = await toolRequest(reviewer,
       "You are the Reviewer. Inspect the changed code as needed. Evaluate correctness, edge cases, and the check results. Start your answer with APPROVED: or CHANGES_NEEDED: and give concrete reasons. Do not edit files.",
@@ -68,7 +68,7 @@ export async function runCodingTask(repoPath: string, task: string, providers: C
         "You are the Lead engineer. Repair the implementation using the repository tools. Address the reviewer and failed checks. Apply patches only; do not run commands. This is the final repair pass.",
         `Task: ${task}\nReview:\n${review.text}\nChecks:\n${checksText(checks)}\nCurrent diff:\n${changes.slice(0, 24_000)}`, leadTools);
       changes = await diff(worktree.path);
-      checks = await runChecks(worktree.path);
+      checks = await runChecks(worktree.path, { repo });
     }
     return { worktree, research: research.text, review: review.text, checks, diff: changes, repaired };
   } catch (error) {

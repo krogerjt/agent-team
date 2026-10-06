@@ -48,6 +48,14 @@ Automatic checks include Node `test` and `typecheck` scripts, one root .NET solu
 
 The runner removes credential-like environment variables, including API keys, before starting repository checks. Checks are still code supplied by the selected repository, so choose repositories you trust.
 
+### Use a Mac as a remote Xcode builder
+
+The Windows workshop can send Apple checks to a Mac without keeping repository clones there. On the Mac, install and initialize full Xcode, install a simulator runtime, enable **Remote Login**, and add your Windows SSH public key. Confirm that `ssh user@mac-host` works from Windows without a password prompt.
+
+In the workshop, open **Options → Mac Build Host**. Enter the SSH alias or `user@host`, test the connection, and enable it. The readiness panel checks macOS, Xcode, simulators, Keychain access, archive tools, and free space. For each check pass, the runner uploads the exact non-ignored worktree to a disposable directory, reuses only build caches, streams Xcode output back, retrieves XCTest summaries and screenshot attachments, and removes the uploaded source.
+
+The same panel stores a per-repository preparation command such as `bundle exec pod install` and maps environment variables to secrets in the Mac login Keychain. Secret values travel over SSH when saved and are never written to the Windows settings file. Keep the Mac powered, awake, and reachable while goals are running.
+
 ## Seven-person team
 
 | Persona | Responsibility |

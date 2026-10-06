@@ -111,10 +111,10 @@ export async function finishRunUpdate(runDir: string): Promise<TeamRunState> {
   let merging = false;
   try { await git(worktree.path, ["rev-parse", "--verify", "MERGE_HEAD"]); merging = true; } catch { /* merge commit already saved */ }
   if (merging || await git(worktree.path, ["diff", "--cached", "--name-only"])) await git(worktree.path, ["-c", "user.name=Agent Team", "-c", "user.email=agent-team@localhost.invalid", "commit", "-m", merging ? "Integrate reviewed run with latest repository" : "Repair updated run"]);
-  const checks = await runChecks(worktree.path);
+  const checks = await runChecks(worktree.path, { repo: state.repo, runDir: state.runDir, taskId: "integration" });
   state.integration.checks = checks;
   await saveState(state);
-  if (checks.some((check) => check.status === "failed")) return state;
+  if (checks.some((check) => check.status === "failed" || check.required && check.status === "missing")) return state;
   if (await git(worktree.path, ["status", "--porcelain", "--untracked-files=all"])) throw new Error(`Checks left unsaved files in the update worktree. Review and stage them before finishing: ${worktree.path}`);
   await stopPreview(state.id);
   state.integrationHistory ??= [];

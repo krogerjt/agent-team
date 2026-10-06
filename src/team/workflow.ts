@@ -100,7 +100,7 @@ async function evaluateTask(
 }
 
 function needsRepair(review: string, qa: string, checks: CheckResult[]): boolean {
-  return checks.some((check) => check.status === "failed") ||
+  return checks.some((check) => check.status === "failed" || check.required && check.status === "missing") ||
     !/^APPROVED:/i.test(review.trim()) || !/^PASS:/i.test(qa.trim());
 }
 
@@ -137,11 +137,18 @@ async function executeTask(
   if (/^NEEDS_INPUT:/i.test(workerResponse)) throw new Error(workerResponse);
   let changes = await diff(worktree.path);
   if (!changes) throw new Error(`${roster[task.worker].name} made no changes for ${task.id}.`);
-  let checks = await runChecks(worktree.path);
+  let checks = await runChecks(worktree.path, { repo: state.repo, runDir: state.runDir, taskId: task.id });
   taskState.status = "review";
   taskState.checks = checks;
   await recordRunEvent(state, task.worker, "checks", checksText(checks), { taskId: task.id, summary: `Checked ${task.title}: ${checks.map((check) => `${check.name} ${check.status}`).join(", ")}` });
   await saveState(state);
+  const unavailable = checks.find((check) => check.required && check.status === "missing");
+  if (unavailable) {
+    taskState.status = "blocked";
+    taskState.error = `${unavailable.name} needs environment setup. Open Workshop Options → Mac Build Host. ${unavailable.output}`;
+    await saveState(state);
+    return false;
+  }
   let { review, qa } = await evaluateTask(state, task, worktree.path, changes, checks, providers, library);
 
   if (needsRepair(review, qa, checks)) {
@@ -149,7 +156,7 @@ async function executeTask(
     await askWithTools(state, task.worker, worker,
       `This is the single repair pass for task ${task.title}. Address the review and QA findings with focused patches.\nReview:\n${review}\nQA:\n${qa}\nChecks:\n${checksText(checks)}\nDiff:\n${changes.slice(0, 24_000)}`, tools);
     changes = await diff(worktree.path);
-    checks = await runChecks(worktree.path);
+    checks = await runChecks(worktree.path, { repo: state.repo, runDir: state.runDir, taskId: `${task.id}-repair` });
     ({ review, qa } = await evaluateTask(state, task, worktree.path, changes, checks, providers, library));
   }
   taskState.review = review;
@@ -317,7 +324,7 @@ async function visualFix(state: TeamRunState, providers: TeamProviders): Promise
     `Goal: ${state.goal}\nYour staged-interface review found an issue: ${state.preview?.visualReview}\nBrowser results: ${JSON.stringify(state.preview?.browserResults)}\nThis is the only visual fix pass. Inspect and patch the relevant code in this worktree.`, new WorkspaceTools(worktree.path, "lead"));
   const changes = await diff(worktree.path);
   if (!changes || /^NEEDS_INPUT:/i.test(response)) return false;
-  const checks = await runChecks(worktree.path);
+  const checks = await runChecks(worktree.path, { repo: state.repo, runDir: state.runDir, taskId: "visual-fix" });
   const pseudoTask: TeamTask = { id: "visual-fix", title: "Fix staged interface", worker: "wren", dependsOn: [] };
   const { review, qa } = await evaluateTask(state, pseudoTask, worktree.path, changes, checks, providers, await readLibrary(state));
   if (needsRepair(review, qa, checks)) { state.preview!.issue = `Visual fix did not pass checks/review: ${review} ${qa}`; return false; }

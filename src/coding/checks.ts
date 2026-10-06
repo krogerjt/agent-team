@@ -4,15 +4,25 @@ import { access, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { git } from "./git.js";
+import { runRemoteChecks } from "../remote/executor.js";
+import { selectSimulatorDestination } from "./apple.js";
+export { selectSimulatorDestination } from "./apple.js";
 
 const execFileAsync = promisify(execFile);
 
 export type CheckStatus = "passed" | "failed" | "missing";
+export interface CheckArtifact { name: string; path: string; mimeType: string }
 export interface CheckResult {
   name: string;
   status: CheckStatus;
   output: string;
+  required?: boolean;
+  executor?: string;
+  summary?: string;
+  artifacts?: CheckArtifact[];
 }
+
+export interface CheckRunContext { repo?: string; runDir?: string; taskId?: string }
 
 export interface CheckCommand {
   name: string;
@@ -104,18 +114,6 @@ async function detectXcodeChecks(root: string): Promise<CheckCommand[]> {
   return commands;
 }
 
-export function selectSimulatorDestination(jsonText: string, platform: string): string | undefined {
-  const parsed = JSON.parse(jsonText) as { devices?: Record<string, Array<{ isAvailable?: boolean; name?: string; udid?: string; state?: string }>> };
-  const devicePattern = platform === "iOS" ? /^iPhone / : platform === "tvOS" ? /Apple TV/ : platform === "watchOS" ? /^Apple Watch / : /Vision Pro/;
-  const candidates = Object.entries(parsed.devices ?? {})
-    .filter(([name]) => name.includes(`.${platform}-`))
-    .sort(([left], [right]) => right.localeCompare(left))
-    .flatMap(([, devices]) => devices)
-    .filter((device) => device.isAvailable !== false && device.udid && devicePattern.test(device.name ?? ""));
-  const selected = candidates.find((device) => device.state === "Booted") ?? candidates[0];
-  return selected?.udid ? `platform=${platform} Simulator,id=${selected.udid}` : undefined;
-}
-
 export async function executeCheck(root: string, command: CheckCommand, timeoutMs = command.timeoutMs ?? 120_000): Promise<CheckResult> {
   if (command.platform && command.platform !== process.platform) {
     return { name: command.name, status: "missing", output: `This check requires ${command.platform === "darwin" ? "macOS with full Xcode installed" : command.platform}; the current host is ${process.platform}.` };
@@ -161,7 +159,7 @@ export async function executeCheck(root: string, command: CheckCommand, timeoutM
   });
 }
 
-export async function runChecks(root: string): Promise<CheckResult[]> {
+export async function runChecks(root: string, context?: CheckRunContext): Promise<CheckResult[]> {
   const commands = await detectChecks(root);
   if (commands.length === 0) return [{ name: "automatic checks", status: "missing", output: "No supported checks detected." }];
   const results: CheckResult[] = [];
@@ -178,6 +176,9 @@ export async function runChecks(root: string): Promise<CheckResult[]> {
       }
     }
   }
+  const remote = runnable.filter((command) => command.platform && command.platform !== process.platform);
+  runnable = runnable.filter((command) => !remote.includes(command));
   for (const command of runnable) results.push(await executeCheck(root, command));
+  if (remote.length) results.push(...await runRemoteChecks(root, remote, context));
   return results;
 }

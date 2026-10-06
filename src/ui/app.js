@@ -1,5 +1,6 @@
-const state = { repo: "", repositories: [], head: "", profiles: [], runs: [], library: "", jobs: {}, selectedRun: null, selectedAgent: "marlow", view: "workshop", panelTab: "chat", review: null, events: [], apiToken: "" };
+const state = { repo: "", repositories: [], head: "", profiles: [], runs: [], library: "", jobs: {}, selectedRun: null, selectedAgent: "marlow", view: "workshop", panelTab: "chat", review: null, events: [], apiToken: "", appleProject: false, remoteHost: { enabled: false, target: "" } };
 const dismissedPrompts = new Set();
+let optionSecrets = {};
 let workspaceVersion = 0;
 const colors = {
   marlow: ["#8b9ce8", "#d6d8c8", "#24356d", "#e6b899"],
@@ -133,6 +134,7 @@ function renderMain() {
   const worker = blocked && run?.plan?.tasks.find((task) => task.id === blocked.id)?.worker;
   main.innerHTML = `
     <section class="hero"><div class="hero-copy"><div class="eyebrow"><span class="spark">✦</span> A SMALL FACTORY FOR BIG IDEAS</div><h1>Good things are<br><em>built together.</em></h1><p>Give your team a goal, watch each desk light up, and step in when they need you.</p></div><div class="hero-cube" aria-hidden="true"><div class="cube-top"></div><div class="cube-left"></div><div class="cube-right"></div><span>✦</span></div></section>
+    ${state.appleProject && !state.remoteHost.enabled ? `<button class="mac-host-banner" id="configure-mac-host"><span>⌘</span><strong>Apple project detected</strong><small>Connect a Mac Build Host so the team can run Xcode and simulator checks.</small><b>Set up →</b></button>` : ""}
     <form id="goal-form" class="goal-composer"><div class="composer-icon">✎</div><label for="goal-input"><strong>What should the team build?</strong><span>Describe a coding goal for this repository.</span></label><input id="goal-input" name="goal" maxlength="4000" placeholder="e.g. Add a friendly empty state to the dashboard" required><button class="primary-button" type="submit">Start goal <span>↗</span></button></form>
     ${blocked ? `<section class="summons" role="alert"><div class="summons-portrait">${avatar(worker || "marlow", "small")}</div><div class="summons-copy"><span class="eyebrow">A QUESTION FROM ${escapeHtml(worker || "THE TEAM")}</span><h2>${escapeHtml(profile(worker)?.name || "The team")} needs your help.</h2><p>${escapeHtml(blocked.error || "This task needs a decision before work can continue.")}</p><form id="answer-form"><input name="answer" maxlength="8000" aria-label="Your answer" placeholder="Type your answer or direction…" required><button class="primary-button">Send answer →</button></form></div></section>` : piperNeeds ? `<section class="summons" role="alert"><div class="summons-portrait">${avatar("piper", "small")}</div><div class="summons-copy"><span class="eyebrow">PIPER AT THE TEST BENCH</span><h2>Piper needs your help.</h2><p>${escapeHtml(run.preview.issue)}</p><button class="primary-button" data-view="bench">Open Test Bench →</button></div></section>` : ""}
     ${run?.status === "awaiting-review" ? `<section class="review-banner"><div><span class="eyebrow">${run.baseCommit === state.head ? "READY FOR YOU" : "PAST RUN"}</span><h2>${run.baseCommit === state.head ? "The team has finished building." : "This build is still here to review."}</h2><p>${run.baseCommit === state.head ? "Review the changes and checks before merging into your main checkout." : "Your checkout has moved on. Open review to save local work and update this build to the latest code."}</p></div><button class="secondary-button" id="review-button">Open review ↗</button></section>` : ""}
@@ -271,7 +273,7 @@ async function openReview() {
     run = state.review.state;
     $("#review-modal")?.remove();
     const modal = document.createElement("div"); modal.className = "modal-backdrop"; modal.id = "review-modal";
-    modal.innerHTML = `<div class="review-modal" role="dialog" aria-modal="true" aria-label="Review team changes"><div class="review-header"><div><span class="eyebrow">BEFORE IT JOINS YOUR MAIN BRANCH</span><h2>Review the build</h2><p>${escapeHtml(run.goal)}</p></div><button class="icon-button" data-close="review" aria-label="Close review">✕</button></div><div class="review-scroll"><div class="review-summary"><h3>Marlow's note</h3><p>${escapeHtml(run.summary || "No summary yet.")}</p></div>${run.tasks.map((task) => `<div class="review-task"><strong>${escapeHtml(taskLabel(task, run))}</strong><span class="status-chip ${escapeHtml(task.status)}">${escapeHtml(task.status)}</span><p><b>Review:</b> ${escapeHtml(task.review || "Pending")}</p><p><b>QA:</b> ${escapeHtml(task.qa || "Pending")}</p><div class="check-list">${(task.checks || []).map((check) => `<span class="check ${escapeHtml(check.status)}">${escapeHtml(check.name)} · ${escapeHtml(check.status)}</span>`).join("")}</div></div>`).join("")}<h3>Code changes</h3><pre class="diff">${escapeHtml(state.review.diff || "No staged diff to show.")}</pre>${run.memoryNote ? `<div class="review-summary"><h3>Tove's pending library note</h3><p>${escapeHtml(run.memoryNote)}</p></div>` : ""}</div><div class="review-actions"><span>${run.baseCommit === state.head ? "Merge is local. Nothing is pushed." : "This run began from an older checkout and cannot merge here."}</span><button class="primary-button" id="merge-button" ${run.status !== "awaiting-review" || run.baseCommit !== state.head ? "disabled" : ""}>Merge reviewed work →</button></div></div>`;
+    modal.innerHTML = `<div class="review-modal" role="dialog" aria-modal="true" aria-label="Review team changes"><div class="review-header"><div><span class="eyebrow">BEFORE IT JOINS YOUR MAIN BRANCH</span><h2>Review the build</h2><p>${escapeHtml(run.goal)}</p></div><button class="icon-button" data-close="review" aria-label="Close review">✕</button></div><div class="review-scroll"><div class="review-summary"><h3>Marlow's note</h3><p>${escapeHtml(run.summary || "No summary yet.")}</p></div>${run.tasks.map((task) => `<div class="review-task"><strong>${escapeHtml(taskLabel(task, run))}</strong><span class="status-chip ${escapeHtml(task.status)}">${escapeHtml(task.status)}</span><p><b>Review:</b> ${escapeHtml(task.review || "Pending")}</p><p><b>QA:</b> ${escapeHtml(task.qa || "Pending")}</p><div class="check-list">${(task.checks || []).map((check) => checkMarkup(check, run.id)).join("")}</div></div>`).join("")}<h3>Code changes</h3><pre class="diff">${escapeHtml(state.review.diff || "No staged diff to show.")}</pre>${run.memoryNote ? `<div class="review-summary"><h3>Tove's pending library note</h3><p>${escapeHtml(run.memoryNote)}</p></div>` : ""}</div><div class="review-actions"><span>${run.baseCommit === state.head ? "Merge is local. Nothing is pushed." : "This run began from an older checkout and cannot merge here."}</span><button class="primary-button" id="merge-button" ${run.status !== "awaiting-review" || run.baseCommit !== state.head ? "disabled" : ""}>Merge reviewed work →</button></div></div>`;
     const recovery = document.createElement("section"); recovery.className = "git-recovery";
     recovery.innerHTML = gitRecoveryMarkup(state.review.readiness.git, state.review.readiness, run);
     modal.querySelector(".review-scroll").prepend(recovery);
@@ -284,6 +286,39 @@ async function openReview() {
     modal.querySelector(".review-actions").innerHTML = `<span>${ready ? "Ready to merge locally into " + escapeHtml(state.review.readiness.git.branch) + "." : "Merge is unavailable. Use the Git actions above to clear the listed blockers."}</span><button class="primary-button" id="merge-button" ${ready ? "" : "disabled"}>${ready ? "Merge reviewed work →" : "Merge unavailable"}</button>`;
     document.body.append(modal);
   } catch (error) { notify(error.message, true); }
+}
+
+function checkMarkup(check, runId) {
+  const artifacts = (check.artifacts || []).map((artifact) => {
+    const url = `/api/runs/${encodeURIComponent(runId)}/check-artifact?path=${encodeURIComponent(artifact.path)}&token=${encodeURIComponent(state.apiToken)}`;
+    return artifact.mimeType.startsWith("image/") ? `<a href="${url}" target="_blank"><img src="${url}" alt="${escapeHtml(artifact.name)}"></a>` : `<a href="${url}" target="_blank">${escapeHtml(artifact.name)}</a>`;
+  }).join("");
+  const detail = check.output || check.summary || artifacts ? `<details class="check-details"><summary>${escapeHtml(check.name)} · ${escapeHtml(check.status)}${check.executor ? ` on ${escapeHtml(check.executor)}` : ""}</summary>${check.summary ? `<pre>${escapeHtml(check.summary)}</pre>` : ""}${check.output ? `<pre>${escapeHtml(check.output)}</pre>` : ""}${artifacts ? `<div class="check-artifacts">${artifacts}</div>` : ""}</details>` : "";
+  return `<div><span class="check ${escapeHtml(check.status)}">${escapeHtml(check.name)} · ${escapeHtml(check.status)}</span>${detail}</div>`;
+}
+
+function renderSecretMappings() {
+  const container = $("#remote-secret-mappings"); if (!container) return;
+  const entries = Object.entries(optionSecrets);
+  container.innerHTML = entries.length ? entries.map(([variable, name]) => `<div class="secret-map"><code>${escapeHtml(variable)}</code><span>→</span><strong>${escapeHtml(name)}</strong><button type="button" data-remove-mac-secret="${escapeHtml(variable)}" aria-label="Remove ${escapeHtml(variable)}">✕</button></div>`).join("") : `<p class="subtle">No build secrets mapped for this repository.</p>`;
+}
+
+function renderRemoteReadiness(result) {
+  const container = $("#remote-readiness"); if (!container) return;
+  container.innerHTML = (result.items || []).map((item) => `<div class="remote-status-item ${item.ok ? "ok" : "bad"}"><strong>${item.ok ? "✓" : "!"} ${escapeHtml(item.name)}</strong><span>${escapeHtml(item.detail)}</span></div>`).join("");
+}
+
+async function openOptions() {
+  const data = await api("/api/options/mac-host");
+  optionSecrets = { ...(data.project.secrets || {}) };
+  $("#options-modal")?.remove();
+  const modal = document.createElement("div"); modal.className = "modal-backdrop"; modal.id = "options-modal";
+  modal.innerHTML = `<div class="remote-modal" role="dialog" aria-modal="true" aria-label="Workshop options"><div class="review-header"><div><span class="eyebrow">WORKSHOP OPTIONS</span><h2>Mac Build Host</h2><p>Keep the workshop on Windows and send Apple builds to your Mac automatically.</p></div><button class="icon-button" data-close="options" aria-label="Close options">✕</button></div><div class="remote-body">
+    <section class="remote-card"><h3>Connection</h3><p>Use an SSH alias or user@host that already works with key authentication.</p><form id="mac-host-form"><div class="remote-grid"><label>SSH TARGET<input name="target" value="${escapeHtml(data.host.target)}" placeholder="builder@mac.local" required></label><label>PORT<input name="port" type="number" min="1" max="65535" value="${escapeHtml(data.host.port || "")}" placeholder="22"></label><label>REMOTE CACHE ROOT<input name="root" value="${escapeHtml(data.host.root)}" required></label></div><label class="remote-toggle"><input name="enabled" type="checkbox" ${data.host.enabled ? "checked" : ""}> Use this Mac automatically for Apple checks</label><div class="remote-actions"><button class="primary-button" type="submit">Save host</button><button class="secondary-button" type="button" id="mac-host-test">${data.host.target ? "Test saved connection" : "Test connection"}</button><span class="remote-test-note">Checks the Mac without starting an agent job or uploading your project.</span></div></form><div id="remote-readiness" class="remote-status"></div></section>
+    <section class="remote-card"><h3>This repository</h3><p>${data.appleChecks.length ? `Detected: ${data.appleChecks.map(escapeHtml).join(" · ")}` : "No Apple checks are currently detected."}</p><form id="mac-project-form"><label>PREPARATION COMMAND<textarea name="setupCommand" rows="2" placeholder="Optional, for example: bundle exec pod install">${escapeHtml(data.project.setupCommand || "")}</textarea></label><button class="secondary-button" type="submit">Save project setup</button></form></section>
+    <section class="remote-card"><h3>Mac Keychain secrets</h3><p>Values travel over SSH and are stored in the Mac user's login Keychain. Only the mapping names remain on Windows.</p><div id="remote-secret-mappings" class="secret-mappings"></div><form id="mac-secret-form" class="remote-secret-form"><label>VARIABLE<input name="variable" placeholder="API_BASE_URL" required></label><label>KEYCHAIN NAME<input name="name" placeholder="ios/api-base" required></label><label>VALUE<input name="value" type="password" required></label><button class="secondary-button" type="submit">Save & map</button></form></section>
+  </div></div>`;
+  document.body.append(modal); renderSecretMappings();
 }
 
 function gitRecoveryMarkup(status, readiness, run) {
@@ -339,8 +374,26 @@ document.addEventListener("click", async (event) => {
   if (target.dataset.close === "review") { $("#review-modal")?.remove(); return; }
   if (target.dataset.close === "repo") { $("#repo-modal")?.remove(); return; }
   if (target.dataset.close === "git") { $("#git-modal")?.remove(); return; }
+  if (target.dataset.close === "options") { $("#options-modal")?.remove(); return; }
   if (target.dataset.close === "input") { dismissedPrompts.add(state.selectedRun); $("#input-prompt")?.remove(); return; }
   if (target.id === "repo-button") { openRepositoryPicker(); return; }
+  if (target.id === "options-button") { try { await openOptions(); } catch (error) { notify(error.message, true); } return; }
+  if (target.id === "configure-mac-host") { try { await openOptions(); } catch (error) { notify(error.message, true); } return; }
+  if (target.id === "mac-host-test") {
+    const form = $("#mac-host-form"); const data = new FormData(form); target.disabled = true; target.textContent = "Testing…";
+    try {
+      const result = await api("/api/options/mac-host/test", { method: "POST", body: JSON.stringify({ enabled: data.get("enabled") === "on", target: data.get("target"), port: data.get("port"), root: data.get("root") }) });
+      renderRemoteReadiness(result); notify(result.ok ? "Mac Build Host is ready." : "The Mac needs attention before remote builds can run.", !result.ok);
+    } catch (error) { notify(error.message, true); }
+    finally { target.disabled = false; target.textContent = new FormData(form).get("target") ? "Test saved connection" : "Test connection"; }
+    return;
+  }
+  if (target.dataset.removeMacSecret) {
+    delete optionSecrets[target.dataset.removeMacSecret]; renderSecretMappings();
+    try { await api("/api/options/mac-project", { method: "PUT", body: JSON.stringify({ setupCommand: new FormData($("#mac-project-form")).get("setupCommand"), secrets: optionSecrets }) }); notify("Secret mapping removed."); }
+    catch (error) { notify(error.message, true); }
+    return;
+  }
   if (target.id === "git-tools-button") { await openGitTools(); return; }
   if (target.id === "git-refresh") { await refreshGitView(); return; }
   if (["git-update-run", "git-finish-update", "git-review-preview"].includes(target.id)) {
@@ -389,12 +442,29 @@ document.addEventListener("click", async (event) => {
 
 document.addEventListener("submit", async (event) => {
   const form = event.target;
-  if (!["goal-form", "answer-form", "answer-pop-form", "chat-form", "journal-form", "timeline-form", "model-form", "secret-form", "requested-secret-form", "repo-form", "git-commit-form"].includes(form.id)) return;
+  if (!["goal-form", "answer-form", "answer-pop-form", "chat-form", "journal-form", "timeline-form", "model-form", "secret-form", "requested-secret-form", "repo-form", "git-commit-form", "mac-host-form", "mac-project-form", "mac-secret-form"].includes(form.id)) return;
   event.preventDefault();
   if (form.id === "goal-form") return submitGoal(form);
   if (form.id === "timeline-form") return loadTimeline(form);
   const button = form.querySelector("button[type=submit], button:not([type])"); if (button) button.disabled = true;
   try {
+    if (form.id === "mac-host-form") {
+      const data = new FormData(form);
+      await api("/api/options/mac-host", { method: "PUT", body: JSON.stringify({ enabled: data.get("enabled") === "on", target: data.get("target"), port: data.get("port"), root: data.get("root") }) });
+      await refresh(true); notify("Mac Build Host settings saved."); return;
+    }
+    if (form.id === "mac-project-form") {
+      const data = new FormData(form);
+      await api("/api/options/mac-project", { method: "PUT", body: JSON.stringify({ setupCommand: data.get("setupCommand"), secrets: optionSecrets }) });
+      notify("Remote project setup saved."); return;
+    }
+    if (form.id === "mac-secret-form") {
+      const data = new FormData(form); const variable = data.get("variable").toString(); const name = data.get("name").toString();
+      await api("/api/options/mac-secret", { method: "POST", body: JSON.stringify({ name, value: data.get("value") }) });
+      optionSecrets[variable] = name;
+      await api("/api/options/mac-project", { method: "PUT", body: JSON.stringify({ setupCommand: new FormData($("#mac-project-form")).get("setupCommand"), secrets: optionSecrets }) });
+      form.reset(); renderSecretMappings(); notify("Secret saved to the Mac Keychain and mapped to this repository."); return;
+    }
     if (form.id === "git-commit-form") {
       const data = new FormData(form);
       await api("/api/git/commit", { method: "POST", body: JSON.stringify({ head: form.dataset.head, message: data.get("message"), files: data.getAll("files") }) });
@@ -440,7 +510,7 @@ document.addEventListener("change", (event) => {
 });
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") { $("#review-modal")?.remove(); $("#repo-modal")?.remove(); $("#git-modal")?.remove(); }
+  if (event.key === "Escape") { $("#review-modal")?.remove(); $("#repo-modal")?.remove(); $("#git-modal")?.remove(); $("#options-modal")?.remove(); }
 });
 
 await refresh();

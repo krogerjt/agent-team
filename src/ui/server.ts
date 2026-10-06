@@ -16,6 +16,9 @@ import { readCookbook } from "../preview/cookbook.js";
 import { runPerformanceReview } from "../team/performance-review.js";
 import { recentRepositories, rememberRepository, resolveRepository } from "./repositories.js";
 import { commitLocalChanges, finishRunUpdate, mergeReadiness, repositoryGitStatus, resolveRunConflict, updateRunToLatest } from "../team/git-actions.js";
+import { readRemoteBuildHost, readRemoteProjectSettings, saveRemoteBuildHost, saveRemoteProjectSettings, suggestedSetupCommand, type RemoteBuildHost, type RemoteProjectSettings } from "../remote/settings.js";
+import { saveRemoteKeychainSecret, testRemoteBuildHost } from "../remote/executor.js";
+import { detectChecks } from "../coding/checks.js";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const repoArg = process.argv[2] ?? ".";
@@ -78,6 +81,10 @@ async function runs(repo: string): Promise<TeamRunState[]> {
   return states.filter((state): state is TeamRunState => Boolean(state)).sort((a, b) => b.id.localeCompare(a.id)).slice(0, 40);
 }
 
+async function hasAppleProject(repo: string): Promise<boolean> {
+  return (await git(repo, ["ls-files"])).split(/\r?\n/).some((file) => /(?:\.xcodeproj\/project\.pbxproj|\.xcworkspace\/contents\.xcworkspacedata)$/.test(file));
+}
+
 function launch(repo: string, work: () => Promise<TeamRunState>, initialRunId?: string): string {
   const id = randomUUID();
   jobs.set(id, { status: "running", repo, runId: initialRunId });
@@ -130,8 +137,43 @@ async function serve(req: IncomingMessage, res: ServerResponse, workspace: { rep
     const ids = Object.keys(roster) as PersonaId[];
     const profiles = await Promise.all(ids.map(async (id) => ({ ...await readPersona(repo, id), effective: await effectiveModel(repo, id), ...roster[id] })));
     const repoJobs = Object.fromEntries([...jobs].filter(([, job]) => job.repo === repo));
-    json(res, 200, { repo, repositories: await recentRepositories(), head: await git(repo, ["rev-parse", "HEAD"]), profiles, runs: await runs(repo), library: await readLibrary({ libraryPath: path.join(repoHome(repo), "library.md") }), jobs: repoJobs, apiToken });
+    const remoteHost = await readRemoteBuildHost();
+    json(res, 200, { repo, repositories: await recentRepositories(), head: await git(repo, ["rev-parse", "HEAD"]), profiles, runs: await runs(repo), library: await readLibrary({ libraryPath: path.join(repoHome(repo), "library.md") }), jobs: repoJobs, apiToken, appleProject: await hasAppleProject(repo), remoteHost: { enabled: remoteHost.enabled, target: remoteHost.target } });
     return;
+  }
+  if (url.pathname === "/api/options/mac-host") {
+    if (method === "GET") {
+      const host = await readRemoteBuildHost();
+      const project = await readRemoteProjectSettings(repo);
+      const suggested = project.setupCommand || await suggestedSetupCommand(repo);
+      const appleChecks = (await detectChecks(repo)).filter((check) => check.platform === "darwin").map((check) => check.name);
+      json(res, 200, { host, project: { ...project, setupCommand: suggested }, appleChecks }); return;
+    }
+    if (method === "PUT") {
+      const input = await body(req);
+      const host = await saveRemoteBuildHost({ enabled: Boolean(input.enabled), target: String(input.target ?? ""), port: input.port === "" || input.port === undefined ? undefined : Number(input.port), root: String(input.root ?? "") });
+      json(res, 200, { host }); return;
+    }
+  }
+  if (method === "POST" && url.pathname === "/api/options/mac-host/test") {
+    const input = await body(req);
+    const current = await readRemoteBuildHost();
+    const host: RemoteBuildHost = input.target === undefined ? current : { enabled: Boolean(input.enabled), target: String(input.target), port: input.port === "" || input.port === undefined ? undefined : Number(input.port), root: String(input.root || ".agent-team-builder") };
+    const project = await readRemoteProjectSettings(repo);
+    json(res, 200, await testRemoteBuildHost(host, project.setupCommand)); return;
+  }
+  if (method === "PUT" && url.pathname === "/api/options/mac-project") {
+    const input = await body(req);
+    const secrets = input.secrets && typeof input.secrets === "object" && !Array.isArray(input.secrets) ? input.secrets as Record<string, string> : {};
+    const project = await saveRemoteProjectSettings(repo, { setupCommand: String(input.setupCommand ?? ""), secrets } as RemoteProjectSettings);
+    json(res, 200, { project }); return;
+  }
+  if (method === "POST" && url.pathname === "/api/options/mac-secret") {
+    const input = await body(req);
+    const host = await readRemoteBuildHost();
+    if (!host.target) throw new Error("Configure the Mac Build Host before saving a Keychain secret.");
+    await saveRemoteKeychainSecret(host, string(input.name, "a Keychain secret name", 100), string(input.value, "a secret value", 20_000));
+    json(res, 200, { saved: true }); return;
   }
   if (url.pathname === "/api/secrets") {
     if (method === "GET") { json(res, 200, { names: await listSecrets() }); return; }
@@ -144,6 +186,19 @@ async function serve(req: IncomingMessage, res: ServerResponse, workspace: { rep
   if (method === "GET" && url.pathname.startsWith("/api/jobs/")) {
     json(res, 200, jobs.get(url.pathname.slice(10)) ?? { status: "error", error: "Job not found." });
     return;
+  }
+  const checkArtifactMatch = /^\/api\/runs\/([^/]+)\/check-artifact$/.exec(url.pathname);
+  if (method === "GET" && checkArtifactMatch) {
+    if (url.searchParams.get("token") !== apiToken) throw new Error("Workshop request token is missing.");
+    const runDir = runPath(repo, checkArtifactMatch[1]);
+    const relative = url.searchParams.get("path") ?? "";
+    if (!relative || path.isAbsolute(relative) || relative.replaceAll("\\", "/").split("/").includes("..")) throw new Error("Invalid check artifact path.");
+    const base = path.resolve(runDir);
+    const target = path.resolve(base, relative);
+    if (!target.startsWith(base + path.sep)) throw new Error("Check artifact escapes the run directory.");
+    const bytes = await readFile(target);
+    const contentType = /\.png$/i.test(target) ? "image/png" : /\.jpe?g$/i.test(target) ? "image/jpeg" : "application/json; charset=utf-8";
+    res.writeHead(200, { "Content-Type": contentType, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" }); res.end(bytes); return;
   }
   const timelineMatch = /^\/api\/personas\/([^/]+)\/timeline(?:\/([^/]+))?$/.exec(url.pathname);
   if (method === "GET" && timelineMatch) {
@@ -282,6 +337,7 @@ async function serve(req: IncomingMessage, res: ServerResponse, workspace: { rep
     "/styles.css": ["styles.css", "text/css; charset=utf-8"],
     "/performance.css": ["performance.css", "text/css; charset=utf-8"],
     "/git-tools.css": ["git-tools.css", "text/css; charset=utf-8"],
+    "/remote.css": ["remote.css", "text/css; charset=utf-8"],
   };
   if (method === "GET" && url.pathname === "/favicon.ico") {
     res.writeHead(204, { "Cache-Control": "no-store" }); res.end(); return;
