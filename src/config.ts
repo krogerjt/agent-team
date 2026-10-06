@@ -23,6 +23,12 @@ export function toolLoopLimits(env: Environment = process.env): { maxToolCalls: 
   };
 }
 
+export function maxParallelTasks(env: Environment = process.env): number {
+  const value = positiveLimit(env.AGENT_TEAM_MAX_PARALLEL_TASKS, 2, "AGENT_TEAM_MAX_PARALLEL_TASKS");
+  if (value > 4) throw new Error("AGENT_TEAM_MAX_PARALLEL_TASKS must be an integer from 1 to 4.");
+  return value;
+}
+
 const legacyRole: Partial<Record<Role, string>> = {
   marlow: "LEAD",
   juniper: "RESEARCHER",

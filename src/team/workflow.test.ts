@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { readFile, rm } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { tempRepo } from "../coding/test-helpers.js";
@@ -83,6 +83,53 @@ test("six personas move dependent tasks through separate worktrees and wait for 
   assert.match(await readFile(state.libraryPath, "utf8"), /Verified note wording/);
   assert.equal(await git(root, ["status", "--porcelain"]), "");
   for (const persona of ["marlow", "juniper", "kit", "wren", "rowan", "tove"]) assert.ok(calls.includes(persona));
+});
+
+test("independent tasks run in parallel and merge into staging", async () => {
+  const { root, parent } = await tempRepo();
+  cleanup.push({ parent, home: repoHome(root) });
+  await writeFile(path.join(root, "note.txt"), "alpha\nbeta\ngamma\ndelta\nepsilon\n");
+  await git(root, ["commit", "-qam", "multi-line note"]);
+  const plan = { summary: "Edit both ends", tasks: [
+    { id: "start", title: "Change first line", worker: "kit", dependsOn: [] },
+    { id: "end", title: "Change last line", worker: "wren", dependsOn: [] },
+    { id: "polish", title: "Change middle line", worker: "rowan", dependsOn: ["start", "end"] },
+  ] };
+  const working = new Set<string>();
+  let overlapped = false;
+  let release: () => void = () => undefined;
+  const bothWorking = new Promise<void>((resolve) => { release = resolve; });
+  function fake(name: string): ModelProvider & { generateWithTools(request: ToolRequest): Promise<ToolResponse> } {
+    return {
+      name,
+      async generate(): Promise<ModelResponse> { return { text: "Ready for human review." }; },
+      async generateWithTools(request: ToolRequest): Promise<ToolResponse> {
+        if (name === "marlow" && request.userPrompt.includes("return ONLY a JSON")) return { text: JSON.stringify(plan), toolCalls: 0 };
+        if (request.tools.some((tool) => tool.name === "apply_patch") && (name === "kit" || name === "wren" || name === "rowan")) {
+          if (name !== "rowan") {
+            working.add(name);
+            if (working.size === 2) { overlapped = true; release(); }
+            await Promise.race([bothWorking, new Promise((resolve) => setTimeout(resolve, 3_000))]);
+          }
+          const edits = { kit: ["alpha", "ALPHA"], wren: ["epsilon", "EPSILON"], rowan: ["gamma", "GAMMA"] } as const;
+          await request.execute("apply_patch", { path: "note.txt", oldText: edits[name][0], newText: edits[name][1] });
+          return { text: "Implemented task.", toolCalls: 1 };
+        }
+        if (name === "tove") return { text: "PASS: matches the task.", toolCalls: 0 };
+        return { text: "APPROVED: focused change.", toolCalls: 0 };
+      },
+    };
+  }
+  const providers: TeamProviders = {
+    marlow: fake("marlow"), juniper: fake("juniper"), kit: fake("kit"),
+    wren: fake("wren"), rowan: fake("rowan"), tove: fake("tove"), piper: fake("piper"),
+  };
+  const state = await runTeamGoal(root, "Edit the note", providers);
+  assert.equal(state.status, "awaiting-review");
+  assert.equal(overlapped, true, "kit and wren should work at the same time");
+  assert.deepEqual(state.tasks.map((task) => task.status), ["done", "done", "done"]);
+  const merged = (await readFile(path.join(state.staging!.path, "note.txt"), "utf8")).replaceAll("\r\n", "\n");
+  assert.equal(merged, "ALPHA\nbeta\nGAMMA\ndelta\nEPSILON\n");
 });
 
 test("unresolved review blocks integration and merge after one repair pass", async () => {

@@ -6,6 +6,7 @@ import type { CheckResult } from "../coding/checks.js";
 import type { Worktree } from "../coding/git.js";
 import type { TeamPlan } from "./plan.js";
 import type { PreviewInfo } from "../preview/runtime.js";
+import { serialize } from "./serial.js";
 
 export type TaskStatus = "todo" | "doing" | "review" | "done" | "blocked";
 export type RunStatus = "planning" | "doing" | "awaiting-review" | "blocked" | "merged";
@@ -78,8 +79,11 @@ export async function createRunState(repo: string, goal: string, baseCommit: str
 export async function saveState(state: TeamRunState): Promise<void> {
   const destination = path.join(state.runDir, "state.json");
   const temporary = `${destination}.tmp`;
-  await writeFile(temporary, JSON.stringify(state, null, 2) + "\n");
-  await rename(temporary, destination);
+  // Parallel tasks save the same state object; serializing keeps the shared temp file from being clobbered.
+  await serialize(`state:${destination}`, async () => {
+    await writeFile(temporary, JSON.stringify(state, null, 2) + "\n");
+    await rename(temporary, destination);
+  });
 }
 
 export async function loadState(runDir: string): Promise<TeamRunState> {

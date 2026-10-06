@@ -15,7 +15,8 @@ import { extractCookbook, readCookbook, saveCookbook, type Cookbook } from "../p
 import { livePreview, startPreview, stopPreview, PreviewFailure, PreviewPause, PreviewStopped, type PreviewInfo } from "../preview/runtime.js";
 import { inspectPreview, runBrowserSteps, screenshotData, type BrowserStep } from "../preview/browser.js";
 import { buildEnvironmentTools, executeBuildEnvironmentTool } from "./environment-tools.js";
-import { toolLoopLimits } from "../config.js";
+import { maxParallelTasks, toolLoopLimits } from "../config.js";
+import { serialize } from "./serial.js";
 
 export type TeamProviders = Record<PersonaId, ModelProvider>;
 const stopPreviewTool = { name: "stop_preview", description: "Stop the local preview for this run when it is no longer needed.", parameters: { type: "object", properties: {}, required: [], additionalProperties: false } };
@@ -69,12 +70,12 @@ async function recordRunEvent(
 
 async function askWithTools(
   state: TeamRunState, persona: PersonaId, provider: ToolCapableProvider,
-  prompt: string, tools: WorkspaceTools, journalWork = true,
+  prompt: string, tools: WorkspaceTools, journalWork = true, taskId?: string,
 ): Promise<string> {
   const personal = await personaContext(state.repo, persona);
   const writable = tools.definitions.some((tool) => tool.name === "apply_patch");
-  const activeTitle = state.plan?.tasks.find((task) => state.tasks.some((item) => item.id === task.id && (item.status === "doing" || item.status === "review")))?.title ?? state.goal;
-  if (journalWork) await recordRunEvent(state, persona, "started", prompt.slice(0, 300), { summary: `${roster[persona].name} started ${activeTitle}` });
+  const activeTitle = state.plan?.tasks.find((task) => taskId ? task.id === taskId : state.tasks.some((item) => item.id === task.id && (item.status === "doing" || item.status === "review")))?.title ?? state.goal;
+  if (journalWork) await recordRunEvent(state, persona, "started", prompt.slice(0, 300), { taskId, summary: `${roster[persona].name} started ${activeTitle}` });
   else await logEvent(state, persona, "started", prompt.slice(0, 300));
   const response = await generateToolsFor(state, persona, provider, {
     systemPrompt: `${roster[persona].systemPrompt}\n${personal}`,
@@ -93,16 +94,16 @@ async function askWithTools(
         return executeMemoryTool(state.repo, persona, name, args);
       }
       if (journalWork) await recordRunEvent(state, persona, "tool", `${name} ${JSON.stringify(args).slice(0, 300)}`, {
-        summary: `${roster[persona].name} used ${name}${typeof args.path === "string" ? ` on ${args.path}` : ""}`,
+        taskId, summary: `${roster[persona].name} used ${name}${typeof args.path === "string" ? ` on ${args.path}` : ""}`,
         files: typeof args.path === "string" ? [args.path] : [],
       });
       else await logEvent(state, persona, "tool", `${name} ${JSON.stringify(args).slice(0, 300)}`);
-      if (name === "inspect_build_environment" || name === "run_checks") return executeBuildEnvironmentTool(name, tools.root, state.repo, writable, { runDir: state.runDir, taskId: state.tasks.find((task) => task.status === "doing")?.id });
+      if (name === "inspect_build_environment" || name === "run_checks") return executeBuildEnvironmentTool(name, tools.root, state.repo, writable, { runDir: state.runDir, taskId: taskId ?? state.tasks.find((task) => task.status === "doing")?.id });
       return tools.execute(name, args);
     },
     ...toolLoopLimits(),
   }, journalWork);
-  if (journalWork) await recordRunEvent(state, persona, "responded", `tool calls: ${response.toolCalls}; ${response.text.slice(0, 1_500)}`, { summary: `${roster[persona].name} returned findings for ${activeTitle}; acceptance checks are separate` });
+  if (journalWork) await recordRunEvent(state, persona, "responded", `tool calls: ${response.toolCalls}; ${response.text.slice(0, 1_500)}`, { taskId, summary: `${roster[persona].name} returned findings for ${activeTitle}; acceptance checks are separate` });
   else await logEvent(state, persona, "responded", `tool calls: ${response.toolCalls}; ${response.text.slice(0, 300)}`);
   if (!response.text.trim()) throw new Error(`${roster[persona].name} returned an empty response.`);
   return response.text.trim();
@@ -116,10 +117,10 @@ async function evaluateTask(
   const context = `Goal: ${state.goal}\nTask: ${task.title}\nShared library:\n${library || "(empty)"}\nDiff:\n${changes.slice(0, 24_000)}\nChecks:\n${checksText(checks)}`;
   const review = await askWithTools(state, reviewer, requireToolProvider(providers[reviewer]),
     `${context}\nReview this worker's changes. Begin with APPROVED: or CHANGES_NEEDED: and give concrete reasons. Do not edit files.`,
-    new WorkspaceTools(workerPath, "researcher"));
+    new WorkspaceTools(workerPath, "researcher"), true, task.id);
   const qa = await askWithTools(state, "tove", requireToolProvider(providers.tove),
     `${context}\nCheck task acceptance and verification. Begin with PASS: or ISSUES: and distinguish what checks actually verified. Do not edit files.`,
-    new WorkspaceTools(workerPath, "researcher"));
+    new WorkspaceTools(workerPath, "researcher"), true, task.id);
   return { review, qa };
 }
 
@@ -149,7 +150,7 @@ async function executeTask(
   if (!research) {
     research = await askWithTools(state, "juniper", requireToolProvider(providers.juniper),
       `Goal: ${state.goal}\nAssigned task: ${task.title}\nShared library:\n${library || "(empty)"}\nInspect the relevant repository files and report a concise implementation brief for ${roster[task.worker].name}.`,
-      new WorkspaceTools(worktree.path, "researcher"));
+      new WorkspaceTools(worktree.path, "researcher"), true, task.id);
     taskState.research = research;
     await saveState(state);
   }
@@ -157,7 +158,7 @@ async function executeTask(
   const worker = requireToolProvider(providers[task.worker]);
   const tools = new WorkspaceTools(worktree.path, "lead");
   const workerResponse = await askWithTools(state, task.worker, worker,
-    `Goal: ${state.goal}\nAssigned task: ${task.title}\nOther tasks and dependencies: ${JSON.stringify(state.plan?.tasks)}\nJuniper's brief:\n${research}\nShared library:\n${library || "(empty)"}\n${answer ? `Human answer or guidance: ${answer}\nInspect your existing worktree changes and continue this task.\n` : ""}Implement only this task now, using apply_patch for changes. If a decision is required before proceeding, begin your response with NEEDS_INPUT: and state the exact question.`, tools);
+    `Goal: ${state.goal}\nAssigned task: ${task.title}\nOther tasks and dependencies: ${JSON.stringify(state.plan?.tasks)}\nJuniper's brief:\n${research}\nShared library:\n${library || "(empty)"}\n${answer ? `Human answer or guidance: ${answer}\nInspect your existing worktree changes and continue this task.\n` : ""}Tasks that do not depend on yours may be running at the same time in their own worktrees, so stay strictly inside this task's scope and avoid unrelated edits or reformatting. Implement only this task now, using apply_patch for changes. If a decision is required before proceeding, begin your response with NEEDS_INPUT: and state the exact question.`, tools, true, task.id);
   if (/^NEEDS_INPUT:/i.test(workerResponse)) throw new Error(workerResponse);
   let changes = await diff(worktree.path);
   if (!changes) throw new Error(`${roster[task.worker].name} made no changes for ${task.id}.`);
@@ -173,7 +174,7 @@ async function executeTask(
     try {
       const diagnosis = await askWithTools(state, "piper", requireToolProvider(providers.piper),
         `The host could not run required checks for ${task.title}. Diagnose the environment using inspect_build_environment and repository files. Checks:\n${checksText(checks)}\nGive concrete setup steps and identify whether the problem is Mac connectivity, Xcode, simulator, Keychain or repository preparation. Do not edit application code or request secret values. Readiness alone does not verify a build.`,
-        new WorkspaceTools(worktree.path, "researcher"), false);
+        new WorkspaceTools(worktree.path, "researcher"), false, task.id);
       taskState.error += `\n\nPiper: ${diagnosis}`;
       await recordRunEvent(state, "piper", "environment-blocked", diagnosis, { taskId: task.id, summary: `Diagnosed build environment for ${task.title}` });
     } catch (error) {
@@ -187,7 +188,7 @@ async function executeTask(
   if (needsRepair(review, qa, checks)) {
     await recordRunEvent(state, task.worker, "repair", `${review.slice(0, 500)} | ${qa.slice(0, 500)}`, { taskId: task.id, summary: `Repairing ${task.title} after review` });
     await askWithTools(state, task.worker, worker,
-      `This is the single repair pass for task ${task.title}. Address the review and QA findings with focused patches.\nReview:\n${review}\nQA:\n${qa}\nChecks:\n${checksText(checks)}\nDiff:\n${changes.slice(0, 24_000)}`, tools);
+      `This is the single repair pass for task ${task.title}. Address the review and QA findings with focused patches.\nReview:\n${review}\nQA:\n${qa}\nChecks:\n${checksText(checks)}\nDiff:\n${changes.slice(0, 24_000)}`, tools, true, task.id);
     changes = await diff(worktree.path);
     checks = await runChecks(worktree.path, { repo: state.repo, runDir: state.runDir, taskId: `${task.id}-repair` });
     ({ review, qa } = await evaluateTask(state, task, worktree.path, changes, checks, providers, library));
@@ -203,40 +204,74 @@ async function executeTask(
     return false;
   }
 
-  await git(worktree.path, ["add", "-A"]);
-  await git(worktree.path, [
-    "-c", `user.name=Agent Team ${roster[task.worker].name}`,
-    "-c", "user.email=agent-team@localhost.invalid",
-    "commit", "-m", `${roster[task.worker].name}: ${task.title}`,
-  ]);
-  await git(staging.path, ["merge", "--ff-only", worktree.branch]);
+  const identity = ["-c", `user.name=Agent Team ${roster[task.worker].name}`, "-c", "user.email=agent-team@localhost.invalid"];
+  // One task integrates at a time so staging only ever advances by fast-forward.
+  const integrated = await serialize(`integrate:${state.id}`, async () => {
+    await git(worktree.path, ["add", "-A"]);
+    await git(worktree.path, [...identity, "commit", "-m", `${roster[task.worker].name}: ${task.title}`]);
+    const taskCommit = await git(worktree.path, ["rev-parse", "HEAD"]);
+    // Keep the task's changes in the worktree (uncommitted) when integration fails, so a retry still sees them.
+    const uncommit = async () => { await git(worktree.path, ["reset", "--hard", taskCommit]).catch(() => undefined); await git(worktree.path, ["reset", "--mixed", `${taskCommit}~1`]).catch(() => undefined); };
+    const upToDate = await git(worktree.path, ["merge-base", "--is-ancestor", staging.branch, "HEAD"]).then(() => true, () => false);
+    if (!upToDate) {
+      // Parallel tasks landed after this worktree branched; fold them in, then re-verify the combined code.
+      try { await git(worktree.path, [...identity, "merge", "--no-edit", staging.branch]); }
+      catch (error) {
+        await git(worktree.path, ["merge", "--abort"]).catch(() => undefined);
+        await uncommit();
+        throw new Error(`${task.title} conflicts with work already merged from parallel tasks. Add a dependency between the overlapping tasks or resolve it by hand. ${error instanceof Error ? error.message : String(error)}`);
+      }
+      checks = await runChecks(worktree.path, { repo: state.repo, runDir: state.runDir, taskId: `${task.id}-merged` });
+      taskState.checks = checks;
+      if (checks.some((check) => check.status === "failed" || check.required && check.status === "missing")) {
+        await uncommit();
+        throw new Error(`Checks failed after combining ${task.title} with parallel tasks.\n${checksText(checks)}`);
+      }
+    }
+    await git(staging.path, ["merge", "--ff-only", worktree.branch]);
+    return !upToDate;
+  });
   taskState.status = "done";
-  await recordRunEvent(state, task.worker, "integrated", `${staging.branch}; checks: ${checks.map((check) => `${check.name} ${check.status}`).join(", ") || "none"}`, { taskId: task.id, summary: `Completed ${task.title}` });
+  await recordRunEvent(state, task.worker, "integrated", `${staging.branch}${integrated ? " (combined with parallel tasks)" : ""}; checks: ${checks.map((check) => `${check.name} ${check.status}`).join(", ") || "none"}`, { taskId: task.id, summary: `Completed ${task.title}` });
   await saveState(state);
   return true;
 }
 
-async function advanceRun(state: TeamRunState, providers: TeamProviders, library: string, answer?: string): Promise<TeamRunState> {
+async function advanceRun(state: TeamRunState, providers: TeamProviders, library: string, answer?: string, answerTaskId?: string): Promise<TeamRunState> {
   state.status = "doing";
   await saveState(state);
-  for (const task of orderedTasks(state.plan!)) {
+  const ordered = orderedTasks(state.plan!);
+  const limit = maxParallelTasks();
+  const running = new Map<string, Promise<void>>();
+  const isBlocked = () => state.status === "blocked";
+  const isDone = (id: string) => state.tasks.find((item) => item.id === id)?.status === "done";
+  const run = async (task: TeamTask): Promise<void> => {
     const taskState = state.tasks.find((item) => item.id === task.id)!;
-    if (taskState.status === "done") continue;
-    const taskAnswer = taskState.status === "blocked" ? answer : undefined;
+    const taskAnswer = taskState.status === "blocked" && (!answerTaskId || answerTaskId === task.id) ? answer : undefined;
     try {
-      if (!await executeTask(state, task, taskState, providers, library, taskAnswer)) {
-        state.status = "blocked";
-        break;
-      }
+      if (!await executeTask(state, task, taskState, providers, library, taskAnswer)) state.status = "blocked";
     } catch (error) {
       taskState.status = "blocked";
       taskState.error = error instanceof Error ? error.message : String(error);
       state.status = "blocked";
       await recordRunEvent(state, task.worker, "error", taskState.error, { taskId: task.id, summary: `Blocked on ${task.title}` });
-      break;
     }
+  };
+  // Start every task whose dependencies are done, up to the limit. Once anything blocks, let running tasks
+  // finish but start nothing new, matching the old stop-on-first-block behavior.
+  for (;;) {
+    if (!isBlocked()) {
+      for (const task of ordered) {
+        if (running.size >= limit) break;
+        if (running.has(task.id) || isDone(task.id) || !task.dependsOn.every(isDone)) continue;
+        const started = run(task).finally(() => running.delete(task.id));
+        running.set(task.id, started);
+      }
+    }
+    if (!running.size) break;
+    await Promise.race(running.values());
   }
-  if (state.status !== "blocked") return finishRun(state, providers, library);
+  if (!isBlocked()) return finishRun(state, providers, library);
   await saveState(state);
   return state;
 }
@@ -430,7 +465,7 @@ export async function runTeamGoal(repoPath: string, goal: string, injectedProvid
   const library = await readLibrary(state);
   try {
     const planText = await askWithTools(state, "marlow", requireToolProvider(providers.marlow),
-      `Goal: ${goal}\nShared library:\n${library || "(empty)"}\nInspect repository files, then return ONLY a JSON object with this shape: {"summary":"...","tasks":[{"id":"short-slug","title":"specific coding task","worker":"kit|wren|rowan","dependsOn":[]}]}. Use 1-4 tasks. Assign Kit implementation/tests, Wren user interface work, Rowan refactoring. Keep tasks small, with dependencies listed by ID. Do not assign reviewers or QA as extra tasks.`,
+      `Goal: ${goal}\nShared library:\n${library || "(empty)"}\nInspect repository files, then return ONLY a JSON object with this shape: {"summary":"...","tasks":[{"id":"short-slug","title":"specific coding task","worker":"kit|wren|rowan","dependsOn":[]}]}. Use 1-4 tasks. Assign Kit implementation/tests, Wren user interface work, Rowan refactoring. Keep tasks small, with dependencies listed by ID. Tasks run in parallel in separate worktrees whenever their dependencies allow, so split the goal into independent tasks that touch different files and leave dependsOn empty for them. Add a dependency only when a task needs another task's output or would edit the same files; chain the rest. Do not serialize work out of habit. Do not assign reviewers or QA as extra tasks.`,
       new WorkspaceTools(repo, "researcher"));
     try {
       state.plan = parsePlan(planText);
@@ -471,7 +506,7 @@ export async function answerTeamRun(runDir: string, answer: string, injectedProv
   if (worker) await recordRunEvent(state, worker, "received-answer", answer, { taskId: blocked.id, summary: `Received guidance for ${state.plan.tasks.find((task) => task.id === blocked.id)?.title ?? blocked.id}` });
   await saveState(state);
   const library = await readLibrary(state);
-  return advanceRun(state, injectedProviders ?? await defaultProviders(repo), `${library || "(empty)"}\n\nCurrent plan:\n${JSON.stringify(state.plan)}`, answer.trim());
+  return advanceRun(state, injectedProviders ?? await defaultProviders(repo), `${library || "(empty)"}\n\nCurrent plan:\n${JSON.stringify(state.plan)}`, answer.trim(), blocked.id);
 }
 
 export async function resumeTeamPreview(runDir: string, approvedCommand?: string, injectedProviders?: TeamProviders): Promise<TeamRunState> {
