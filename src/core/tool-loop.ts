@@ -16,6 +16,8 @@ export class ToolBudget {
   private rounds = 0;
   private traces: ToolCallTrace[] = [];
   private lastFailure?: { signature: string; count: number };
+  private patchFailures = 0;
+  private patchNeedsFreshRead = false;
   private readonly reportDiagnostics?: (diagnostics: ToolLoopDiagnostics) => void;
   toolCalls = 0;
 
@@ -42,6 +44,9 @@ export class ToolBudget {
     const trace: ToolCallTrace = { round: this.rounds, name, args: printableArgs(args) };
     const started = performance.now();
     this.traces.push(trace);
+    if (name === "apply_patch" && this.patchNeedsFreshRead) {
+      throw this.patchSyncError();
+    }
     if (!request.tools.some((tool) => tool.name === name)) {
       trace.durationMs = Math.round(performance.now() - started);
       trace.isError = true;
@@ -58,7 +63,16 @@ export class ToolBudget {
     trace.durationMs = Math.round(performance.now() - started);
     trace.isError = Boolean(result.isError);
     const content = result.content.slice(0, 24_000);
-    if (result.isError) return this.failureResult(trace, content);
+    if (result.isError) {
+      if (name === "apply_patch") {
+        this.patchFailures += 1;
+        this.patchNeedsFreshRead = true;
+        if (this.patchFailures >= 2) throw this.patchSyncError(content);
+      }
+      return this.failureResult(trace, content);
+    }
+    if (name === "read_file") this.patchNeedsFreshRead = false;
+    if (name === "apply_patch") this.patchFailures = 0;
     this.lastFailure = undefined;
     return { content, isError: result.isError };
   }
@@ -89,6 +103,20 @@ export class ToolBudget {
       throw failure;
     }
     return { content, isError: true };
+  }
+
+  private patchSyncError(detail = "The patch context did not match the current file."): Error {
+    const diagnostics = this.diagnostics(
+      `apply_patch failed and requires a fresh read_file before retrying. ${detail}`,
+    );
+    const error = new Error(
+      `apply_patch needs fresh file context before retrying. ${detail} ` +
+      `Recovery: call read_file for the target file and rebuild oldText from its current contents. ` +
+      `Do not reuse the previous patch.`,
+    );
+    this.reportDiagnostics?.(diagnostics);
+    (error as Error & { diagnostics?: ToolLoopDiagnostics }).diagnostics = diagnostics;
+    return error;
   }
 
   private limitError(limit: string, bottleneck: string): Error {

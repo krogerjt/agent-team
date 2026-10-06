@@ -48,3 +48,27 @@ test("tool budget stops repeated identical tool failures with recovery guidance"
     return true;
   });
 });
+
+test("failed patches require fresh file context before another patch", async () => {
+  const failing = request({
+    maxToolCalls: 10, maxRounds: 10,
+    tools: [
+      { name: "apply_patch", description: "patch", parameters: {} },
+      { name: "read_file", description: "read", parameters: {} },
+    ],
+    execute: async (name) => name === "apply_patch"
+      ? { content: "oldText must match exactly once.", isError: true }
+      : { content: "current file contents" },
+  });
+  const budget = new ToolBudget(failing);
+  budget.nextRound();
+  const first = await budget.execute(failing, "apply_patch", { path: "file.swift" });
+  assert.equal(first.isError, true);
+  await assert.rejects(() => budget.execute(failing, "apply_patch", { path: "file.swift" }), (error: unknown) => {
+    assert.match((error as Error).message, /needs fresh file context/);
+    assert.match((error as Error).message, /call read_file/);
+    return true;
+  });
+  await budget.execute(failing, "read_file", { path: "file.swift" });
+  await assert.rejects(() => budget.execute(failing, "apply_patch", { path: "file.swift" }), /needs fresh file context/);
+});
