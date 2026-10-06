@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { ModelRequest, ModelResponse, ToolCapableProvider, ToolRequest, ToolResponse } from "../core/provider.js";
+import { reportModelCall, type ModelRequest, type ModelResponse, type ToolCapableProvider, type ToolRequest, type ToolResponse } from "../core/provider.js";
 import { ToolBudget } from "../core/tool-loop.js";
 
 export class AnthropicProvider implements ToolCapableProvider {
@@ -8,6 +8,7 @@ export class AnthropicProvider implements ToolCapableProvider {
   constructor(private readonly model: string, private readonly client = new Anthropic()) {}
 
   async generate(request: ModelRequest): Promise<ModelResponse> {
+    const started = performance.now();
     const response = await this.client.messages.create({
       model: this.model,
       max_tokens: 2048,
@@ -17,11 +18,13 @@ export class AnthropicProvider implements ToolCapableProvider {
         { type: "text" as const, text: request.userPrompt },
       ] : request.userPrompt }],
     });
+    reportModelCall(request, started, response.usage ? { inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens, totalTokens: response.usage.input_tokens + response.usage.output_tokens } : undefined);
     return {
       text: response.content
         .filter((block): block is Anthropic.TextBlock => block.type === "text")
         .map((block) => block.text)
         .join("\n"),
+      usage: response.usage ? { inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens, totalTokens: response.usage.input_tokens + response.usage.output_tokens } : undefined,
     };
   }
 
@@ -35,6 +38,7 @@ export class AnthropicProvider implements ToolCapableProvider {
     const messages: Anthropic.MessageParam[] = [{ role: "user", content: request.userPrompt }];
     while (true) {
       budget.nextRound();
+      const started = performance.now();
       const response = await this.client.messages.create({
         model: this.model,
         max_tokens: 4096,
@@ -42,11 +46,13 @@ export class AnthropicProvider implements ToolCapableProvider {
         messages,
         tools,
       });
+      reportModelCall(request, started, response.usage ? { inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens, totalTokens: response.usage.input_tokens + response.usage.output_tokens } : undefined);
       const calls = response.content.filter((block) => block.type === "tool_use");
       if (calls.length === 0) {
         return {
           text: response.content.filter((block): block is Anthropic.TextBlock => block.type === "text").map((block) => block.text).join("\n"),
           toolCalls: budget.toolCalls,
+          usage: response.usage ? { inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens, totalTokens: response.usage.input_tokens + response.usage.output_tokens } : undefined,
         };
       }
       messages.push({ role: "assistant", content: response.content });

@@ -2,10 +2,22 @@ export interface ModelRequest {
   systemPrompt: string;
   userPrompt: string;
   images?: Array<{ mimeType: "image/png" | "image/jpeg" | "image/webp"; data: string }>;
+  telemetry?: { recordCall: (usage: ModelUsage | undefined, durationMs: number) => void };
 }
 
 export interface ModelResponse {
   text: string;
+  usage?: ModelUsage;
+}
+
+export interface ModelUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+}
+
+export function reportModelCall(request: ModelRequest, started: number, usage?: ModelUsage): void {
+  request.telemetry?.recordCall(usage, Math.max(0, performance.now() - started));
 }
 
 export interface ModelProvider {

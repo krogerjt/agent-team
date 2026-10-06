@@ -6,7 +6,8 @@ import { WorkspaceTools } from "../coding/workspace-tools.js";
 import { roster, type PersonaId, type WorkerId } from "../personas/roster.js";
 import { orderedTasks, parsePlan, type TeamTask } from "./plan.js";
 import { appendLibrary, createRunState, loadState, logEvent, readLibrary, repoHome, saveState, type TaskState, type TeamRunState } from "./state.js";
-import { appendChat, configuredProvider, personaContext, readPersona } from "./persona-store.js";
+import { appendChat, configuredProvider, effectiveModel, personaContext, readPersona } from "./persona-store.js";
+import { trackedGenerate, trackedGenerateWithTools } from "./telemetry.js";
 import { appendTimeline, ensureTimeline, executeMemoryTool, memoryTools } from "./timeline.js";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
@@ -17,6 +18,14 @@ import { inspectPreview, runBrowserSteps, screenshotData, type BrowserStep } fro
 export type TeamProviders = Record<PersonaId, ModelProvider>;
 const stopPreviewTool = { name: "stop_preview", description: "Stop the local preview for this run when it is no longer needed.", parameters: { type: "object", properties: {}, required: [], additionalProperties: false } };
 const startPreviewTool = { name: "start_preview", description: "Start or inspect the staged web preview. The host follows Piper's cookbook and waits for it to become healthy.", parameters: { type: "object", properties: {}, required: [], additionalProperties: false } };
+
+async function generateFor(state: TeamRunState, persona: PersonaId, provider: ModelProvider, request: Parameters<ModelProvider["generate"]>[0]) {
+  return trackedGenerate(state.repo, persona, await effectiveModel(state.repo, persona), provider, request);
+}
+
+async function generateToolsFor(state: TeamRunState, persona: PersonaId, provider: ToolCapableProvider, request: Parameters<ToolCapableProvider["generateWithTools"]>[0]) {
+  return trackedGenerateWithTools(state.repo, persona, await effectiveModel(state.repo, persona), provider, request);
+}
 
 async function defaultProviders(repo: string): Promise<TeamProviders> {
   const entries = await Promise.all((Object.keys(roster) as PersonaId[]).map(async (id) => [id, await configuredProvider(repo, id)] as const));
@@ -52,7 +61,7 @@ async function askWithTools(
   const activeTitle = state.plan?.tasks.find((task) => state.tasks.some((item) => item.id === task.id && (item.status === "doing" || item.status === "review")))?.title ?? state.goal;
   if (journalWork) await recordRunEvent(state, persona, "started", prompt.slice(0, 300), { summary: `${roster[persona].name} started ${activeTitle}` });
   else await logEvent(state, persona, "started", prompt.slice(0, 300));
-  const response = await provider.generateWithTools({
+  const response = await generateToolsFor(state, persona, provider, {
     systemPrompt: `${roster[persona].systemPrompt}\n${personal}`,
     userPrompt: prompt,
     tools: [...tools.definitions, ...memoryTools, stopPreviewTool, ...(state.tasks.length && state.tasks.every((task) => task.status === "done") && persona !== "piper" ? [startPreviewTool] : [])],
@@ -296,10 +305,10 @@ async function visualReview(state: TeamRunState, providers: TeamProviders, info:
   let proposed: string;
   let visualVerified = false;
   try {
-    proposed = (await providers.wren.generate({ systemPrompt: roster.wren.systemPrompt, userPrompt: prompt, images: images ? [{ mimeType: "image/png", data: images }] : undefined })).text;
+    proposed = (await generateFor(state, "wren", providers.wren, { systemPrompt: roster.wren.systemPrompt, userPrompt: prompt, images: images ? [{ mimeType: "image/png", data: images }] : undefined })).text;
     visualVerified = Boolean(images);
   } catch {
-    proposed = (await providers.wren.generate({ systemPrompt: roster.wren.systemPrompt, userPrompt: prompt + "\nImage input was unavailable; use page structure only." })).text;
+    proposed = (await generateFor(state, "wren", providers.wren, { systemPrompt: roster.wren.systemPrompt, userPrompt: prompt + "\nImage input was unavailable; use page structure only." })).text;
   }
   const scenarios = parseScenarios(proposed);
   if (scenarios.length) await runBrowserSteps(state, info, scenarios);
@@ -307,8 +316,8 @@ async function visualReview(state: TeamRunState, providers: TeamProviders, info:
   const results = info.browserResults ?? [];
   const verdictPrompt = `Goal: ${state.goal}\nPage structure:\n${capture.structure}\nBrowser results:\n${JSON.stringify(results)}\nGive a verdict beginning PASS: or ISSUES:. If visual evidence is essential and unavailable, begin NEEDS_VISION: instead. Explain visible problems, failed browser steps, and limitations. ${visualVerified ? "You received the screenshot." : "Screenshot review was unavailable; do not claim visual verification."}`;
   let verdict: string;
-  try { verdict = (await providers.wren.generate({ systemPrompt: roster.wren.systemPrompt, userPrompt: verdictPrompt, images: visualVerified && images ? [{ mimeType: "image/png", data: images }] : undefined })).text; }
-  catch { visualVerified = false; verdict = (await providers.wren.generate({ systemPrompt: roster.wren.systemPrompt, userPrompt: verdictPrompt + "\nUse text only." })).text; }
+  try { verdict = (await generateFor(state, "wren", providers.wren, { systemPrompt: roster.wren.systemPrompt, userPrompt: verdictPrompt, images: visualVerified && images ? [{ mimeType: "image/png", data: images }] : undefined })).text; }
+  catch { visualVerified = false; verdict = (await generateFor(state, "wren", providers.wren, { systemPrompt: roster.wren.systemPrompt, userPrompt: verdictPrompt + "\nUse text only." })).text; }
   info.visualReview = verdict;
   info.visualVerified = visualVerified;
   state.preview = { ...state.preview, ...info };
@@ -372,11 +381,11 @@ async function finishRun(state: TeamRunState, providers: TeamProviders, library:
   {
     const taskSummary = state.tasks.map((item) => `${item.id}: ${item.status}; checks: ${item.checks?.map((check) => `${check.name} ${check.status}`).join(", ")}; review: ${item.review ?? "none"}; QA: ${item.qa ?? "none"}`).join("\n") + (state.integrationChecks ? `\nThis run was updated against newer repository code. Task notes above describe the original build. Checks on the combined code: ${JSON.stringify(state.integrationChecks)}` : "");
     const finalDiff = await git(state.staging!.path, ["diff", "--no-ext-diff", `${state.baseCommit}..HEAD`, "--", "."]);
-    state.summary = (await providers.marlow.generate({
+    state.summary = (await generateFor(state, "marlow", providers.marlow, {
       systemPrompt: `${roster.marlow.systemPrompt}\n${await personaContext(state.repo, "marlow")}`,
       userPrompt: `Summarize the completed goal and what the user should review before merging. Goal: ${state.goal}\nPlan: ${JSON.stringify(state.plan)}\nTasks:\n${taskSummary}\nPreview: ${JSON.stringify(state.preview ? { status: state.preview.status, browserResults: state.preview.browserResults, visualReview: state.preview.visualReview, visualVerified: state.preview.visualVerified } : "not applicable")}\nFinal diff:\n${finalDiff.slice(0, 24_000)}`,
     })).text;
-    state.memoryNote = (await providers.tove.generate({
+    state.memoryNote = (await generateFor(state, "tove", providers.tove, {
       systemPrompt: `${roster.tove.systemPrompt}\n${await personaContext(state.repo, "tove")}`,
       userPrompt: `Write concise Markdown memory for future runs. Use the QA findings and final diff below as evidence. Record verified repository conventions, decisions, and remaining uncertainty only. Goal: ${state.goal}\nPlan: ${JSON.stringify(state.plan)}\nTasks:\n${taskSummary}\nFinal diff:\n${finalDiff.slice(0, 24_000)}\nHuman decisions: ${JSON.stringify(state.decisions ?? [])}\nExisting library:\n${library}`,
     })).text;
@@ -402,7 +411,7 @@ export async function runTeamGoal(repoPath: string, goal: string, injectedProvid
     try {
       state.plan = parsePlan(planText);
     } catch (error) {
-      const corrected = await providers.marlow.generate({
+      const corrected = await generateFor(state, "marlow", providers.marlow, {
         systemPrompt: roster.marlow.systemPrompt,
         userPrompt: `Your previous plan was invalid: ${error instanceof Error ? error.message : String(error)}. Return ONLY corrected JSON with summary and 1-4 tasks. Previous response:\n${planText.slice(0, 8_000)}`,
       });
@@ -487,7 +496,7 @@ export async function chatTeamPersona(repo: string, persona: PersonaId, message:
   const provider = requireToolProvider(await configuredProvider(repo, persona));
   const personal = await personaContext(repo, persona);
   const tools = new WorkspaceTools(repo, "researcher");
-  const response = await provider.generateWithTools({
+  const response = await trackedGenerateWithTools(repo, persona, await effectiveModel(repo, persona), provider, {
     systemPrompt: `${roster[persona].systemPrompt}\n${personal}`,
     userPrompt: `Recent conversation:\n${history || "(none)"}\nShared repository library:\n${library || "(empty)"}\nUser: ${message}\nReply as ${roster[persona].name}. You may inspect the repository, but do not edit files.`,
     tools: [...tools.definitions, ...memoryTools],

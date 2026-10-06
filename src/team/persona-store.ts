@@ -1,13 +1,31 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createProvider, resolveProviderConfig, type ProviderName } from "../config.js";
-import type { ModelProvider } from "../core/provider.js";
+import type { ModelProvider, ModelUsage } from "../core/provider.js";
 import { roster, type PersonaId } from "../personas/roster.js";
 import { repoHome } from "./state.js";
 import { searchTimeline } from "./timeline.js";
 
 export interface PersonaActivity { at: string; runId: string; event: string; detail: string }
 export interface PersonaChat { at: string; role: "user" | "assistant"; text: string; runId?: string }
+export interface PersonaModelPeriod {
+  calls: number;
+  failedCalls: number;
+  unknownUsageCalls: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  durationMs: number;
+  interactions: number;
+  interactionDurationMs: number;
+  toolCalls: number;
+  rounds: number;
+}
+export interface PersonaModelStats extends PersonaModelPeriod {
+  provider: ProviderName;
+  model: string;
+  monthly: Record<string, PersonaModelPeriod>;
+}
 export interface PerformanceCaseResult {
   scenario: string;
   response: string;
@@ -36,6 +54,7 @@ export interface PersonaProfile {
   model?: string;
   performanceGuidance: string;
   evaluations: PerformanceEvaluation[];
+  modelStats: PersonaModelStats[];
 }
 
 const ids = Object.keys(roster) as PersonaId[];
@@ -56,13 +75,13 @@ function file(repo: string, id: PersonaId): string {
 }
 
 function initial(id: PersonaId): PersonaProfile {
-  return { id, traits: defaultTraits[id], memory: "", activity: [], chat: [], performanceGuidance: "", evaluations: [] };
+  return { id, traits: defaultTraits[id], memory: "", activity: [], chat: [], performanceGuidance: "", evaluations: [], modelStats: [] };
 }
 
 export async function readPersona(repo: string, id: PersonaId): Promise<PersonaProfile> {
   try {
     const value = JSON.parse(await readFile(file(repo, id), "utf8")) as Partial<PersonaProfile>;
-    return { ...initial(id), ...value, id, activity: value.activity ?? [], chat: value.chat ?? [], performanceGuidance: value.performanceGuidance ?? "", evaluations: value.evaluations ?? [] };
+    return { ...initial(id), ...value, id, activity: value.activity ?? [], chat: value.chat ?? [], performanceGuidance: value.performanceGuidance ?? "", evaluations: value.evaluations ?? [], modelStats: value.modelStats ?? [] };
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return initial(id);
     throw error;
@@ -127,6 +146,45 @@ export async function appendEvaluation(repo: string, id: PersonaId, evaluation: 
     profile.evaluations.unshift(evaluation);
     profile.evaluations = profile.evaluations.slice(0, 20);
     profile.performanceGuidance = evaluation.guidance.slice(0, 2_000);
+  });
+}
+
+function emptyPeriod(): PersonaModelPeriod {
+  return { calls: 0, failedCalls: 0, unknownUsageCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: 0, interactions: 0, interactionDurationMs: 0, toolCalls: 0, rounds: 0 };
+}
+
+export interface PersonaUsageSample {
+  at: string;
+  calls: Array<{ usage?: ModelUsage; durationMs: number; failed?: boolean }>;
+  interactionDurationMs: number;
+  toolCalls?: number;
+  rounds?: number;
+  failed?: boolean;
+}
+
+export async function recordPersonaUsage(repo: string, id: PersonaId, identity: { provider: ProviderName; model?: string }, sample: PersonaUsageSample): Promise<void> {
+  await mutatePersona(repo, id, (profile) => {
+    const model = identity.model || "(unconfigured)";
+    let stats = profile.modelStats.find((item) => item.provider === identity.provider && item.model === model);
+    if (!stats) { stats = { provider: identity.provider, model, ...emptyPeriod(), monthly: {} }; profile.modelStats.push(stats); }
+    const month = sample.at.slice(0, 7);
+    const monthly = stats.monthly[month] ?? (stats.monthly[month] = emptyPeriod());
+    const periods = [stats, monthly];
+    for (const period of periods) {
+      period.calls += sample.calls.length;
+      period.failedCalls += sample.failed ? 1 : 0;
+      period.unknownUsageCalls += sample.calls.filter((call) => !call.usage).length;
+      period.durationMs += sample.calls.reduce((sum, call) => sum + call.durationMs, 0);
+      period.interactions += 1;
+      period.interactionDurationMs += sample.interactionDurationMs;
+      period.toolCalls += sample.toolCalls ?? 0;
+      period.rounds += sample.rounds ?? sample.calls.length;
+      for (const call of sample.calls) {
+        period.inputTokens += call.usage?.inputTokens ?? 0;
+        period.outputTokens += call.usage?.outputTokens ?? 0;
+        period.totalTokens += call.usage?.totalTokens ?? ((call.usage?.inputTokens ?? 0) + (call.usage?.outputTokens ?? 0));
+      }
+    }
   });
 }
 

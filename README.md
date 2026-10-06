@@ -154,3 +154,7 @@ To search from the terminal:
 ```powershell
 npm run team -- timeline --repo . --persona wren --query "checkout" --from 2025-01-01
 ```
+
+## Persona model statistics
+
+Each persona profile also keeps cumulative and monthly statistics per provider/model under `modelStats`. The workshop's **Model analytics** view compares interactions, provider calls, known input/output/total tokens, provider latency, end-to-end interaction time, tool calls, and calls where token usage was unavailable. Tool loops count every model round. Token totals are deliberately not estimated when a provider does not return usage, so unknown usage is reported separately rather than as zero. The same data is available from `GET /api/analytics` while the local workshop is running.

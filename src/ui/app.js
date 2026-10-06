@@ -96,7 +96,7 @@ async function refresh(quiet = false) {
 
 function renderSidebar() {
   document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("active", button.dataset.view === state.view));
-  $("#page-title").textContent = state.view === "library" ? "SHARED LIBRARY" : state.view === "bench" ? "TEST BENCH" : state.view === "status" ? "STATUS BOARD" : "WORKSHOP";
+  $("#page-title").textContent = state.view === "library" ? "SHARED LIBRARY" : state.view === "bench" ? "TEST BENCH" : state.view === "status" ? "STATUS BOARD" : state.view === "analytics" ? "MODEL ANALYTICS" : "WORKSHOP";
   $("#run-list").innerHTML = state.runs.length ? state.runs.slice(0, 8).map((run) => `<button class="run-nav ${run.id === state.selectedRun && state.view === "workshop" ? "selected" : ""}" data-run="${escapeHtml(run.id)}"><span class="run-dot ${escapeHtml(run.status)}"></span><span><strong>${escapeHtml(run.goal)}</strong><small>${escapeHtml(run.status.replaceAll("-", " "))} · ${fmt(Number(run.id.split("-")[0]))}</small></span></button>`).join("") : `<p class="sidebar-empty">Your first goal will appear here.</p>`;
 }
 
@@ -195,6 +195,7 @@ function renderMain() {
   }
   if (state.view === "bench") { renderBench(); return; }
   if (state.view === "status") { renderStatusBoard(); return; }
+  if (state.view === "analytics") { renderAnalytics(); return; }
   const run = currentRun();
   const blocked = run?.tasks.find((task) => task.status === "blocked");
   const piperNeeds = run?.status === "blocked" && run.preview?.issue && !blocked;
@@ -212,6 +213,14 @@ function renderMain() {
   if (run) void loadEvents(run.id);
   if (blocked && !dismissedPrompts.has(run.id)) showInputPrompt(run, blocked, worker);
   if (piperNeeds && !dismissedPrompts.has(run.id)) showPiperPrompt(run);
+}
+
+function renderAnalytics() {
+  const rows = state.profiles.flatMap((person) => (person.modelStats || []).map((stats) => ({ person, stats })));
+  const total = (key) => rows.reduce((sum, row) => sum + Number(row.stats[key] || 0), 0);
+  const fmtMs = (value) => value >= 60000 ? `${(value / 60000).toFixed(1)}m` : `${(value / 1000).toFixed(1)}s`;
+  const cards = rows.length ? rows.sort((a, b) => b.stats.interactionDurationMs - a.stats.interactionDurationMs).map(({ person, stats }) => `<article class="library-paper"><div class="paper-header"><span>◈</span> ${escapeHtml(person.name)} · ${escapeHtml(stats.provider)} / ${escapeHtml(stats.model)}</div><div class="task-stack"><div class="task-row"><span class="task-check done">◉</span><div><strong>${stats.interactions} interactions · ${stats.calls} model calls</strong><small>${stats.unknownUsageCalls ? `${stats.unknownUsageCalls} calls without token usage` : "Token usage complete"}</small></div></div><div class="task-row"><span class="task-check doing">↕</span><div><strong>${stats.totalTokens.toLocaleString()} known tokens</strong><small>${stats.inputTokens.toLocaleString()} in · ${stats.outputTokens.toLocaleString()} out</small></div></div><div class="task-row"><span class="task-check review">◷</span><div><strong>${fmtMs(stats.interactionDurationMs)} end-to-end</strong><small>${fmtMs(stats.durationMs)} provider time · ${stats.toolCalls} tool calls</small></div></div></div>${Object.keys(stats.monthly || {}).length ? `<small class="subtle">Monthly buckets: ${Object.entries(stats.monthly).sort().slice(-6).map(([month, item]) => `${escapeHtml(month)} ${item.totalTokens.toLocaleString()} tokens / ${fmtMs(item.interactionDurationMs)}`).join(" · ")}</small>` : ""}</article>`).join("") : `<div class="wall-empty"><span>◌</span><p>No model activity has been recorded yet.<br>Run a goal, chat with a persona, or start a review to build the baseline.</p></div>`;
+  $("#main-content").innerHTML = `<section class="library-page"><div class="eyebrow">THE WORKSHOP LEDGER</div><h1>Model analytics.</h1><p>Compare persona/model throughput before deciding whether parallel subagents will shorten the critical path. Token totals exclude calls where the provider did not report usage.</p><div class="lower-grid"><div class="wall-card"><div class="card-title"><span>◉</span><div><small>ALL PERSONAS</small><h3>${rows.length} model${rows.length === 1 ? "" : "s"} tracked</h3></div></div><div class="task-stack"><div class="task-row"><span class="task-check done">↕</span><div><strong>${total("totalTokens").toLocaleString()} known tokens</strong><small>Input + output across recorded models</small></div></div><div class="task-row"><span class="task-check doing">◷</span><div><strong>${fmtMs(total("interactionDurationMs"))} end-to-end</strong><small>${fmtMs(total("durationMs"))} spent in provider calls</small></div></div><div class="task-row"><span class="task-check review">◇</span><div><strong>${total("calls")} provider calls</strong><small>${total("toolCalls")} tool calls · ${total("unknownUsageCalls")} unknown token reports</small></div></div></div></div><div class="activity-card"><div class="card-title"><span>✧</span><div><small>PERSONA / MODEL STAT BLOCKS</small><h3>Efficiency ledger</h3></div></div>${cards}</div></div></section>`;
 }
 
 function showInputPrompt(run, blocked, worker) {

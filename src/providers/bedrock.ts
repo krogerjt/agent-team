@@ -1,5 +1,5 @@
 import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
-import type { ModelRequest, ModelResponse, ToolCapableProvider, ToolRequest, ToolResponse } from "../core/provider.js";
+import { reportModelCall, type ModelRequest, type ModelResponse, type ToolCapableProvider, type ToolRequest, type ToolResponse } from "../core/provider.js";
 import { ToolBudget } from "../core/tool-loop.js";
 
 export class BedrockProvider implements ToolCapableProvider {
@@ -8,6 +8,7 @@ export class BedrockProvider implements ToolCapableProvider {
   constructor(private readonly model: string, private readonly client = new BedrockRuntimeClient({})) {}
 
   async generate(request: ModelRequest): Promise<ModelResponse> {
+    const started = performance.now();
     const response = await this.client.send(new ConverseCommand({
       modelId: this.model,
       system: [{ text: request.systemPrompt }],
@@ -17,11 +18,13 @@ export class BedrockProvider implements ToolCapableProvider {
       ] }],
       inferenceConfig: { maxTokens: 2048 },
     }));
+    reportModelCall(request, started, response.usage ? { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens, totalTokens: response.usage.totalTokens } : undefined);
     return {
       text: response.output?.message?.content
         ?.map((block) => block.text ?? "")
         .filter(Boolean)
         .join("\n") ?? "",
+      usage: response.usage ? { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens, totalTokens: response.usage.totalTokens } : undefined,
     };
   }
 
@@ -35,6 +38,7 @@ export class BedrockProvider implements ToolCapableProvider {
     })) };
     while (true) {
       budget.nextRound();
+      const started = performance.now();
       const response = await this.client.send(new ConverseCommand({
         modelId: this.model,
         system: [{ text: request.systemPrompt }],
@@ -42,11 +46,12 @@ export class BedrockProvider implements ToolCapableProvider {
         toolConfig,
         inferenceConfig: { maxTokens: 4096 },
       }));
+      reportModelCall(request, started, response.usage ? { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens, totalTokens: response.usage.totalTokens } : undefined);
       const message = response.output?.message;
       if (!message) throw new Error("Bedrock returned no message.");
       const calls = message.content?.filter((block) => block.toolUse) ?? [];
       if (calls.length === 0) {
-        return { text: message.content?.map((block) => block.text ?? "").filter(Boolean).join("\n") ?? "", toolCalls: budget.toolCalls };
+        return { text: message.content?.map((block) => block.text ?? "").filter(Boolean).join("\n") ?? "", toolCalls: budget.toolCalls, usage: response.usage ? { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens, totalTokens: response.usage.totalTokens } : undefined };
       }
       messages.push(message);
       const results = [];

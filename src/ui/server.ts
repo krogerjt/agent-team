@@ -158,6 +158,15 @@ async function serve(req: IncomingMessage, res: ServerResponse, workspace: { rep
     json(res, 200, { repo, repositories: await recentRepositories(), head: await git(repo, ["rev-parse", "HEAD"]), profiles, runs: await runs(repo), library: await readLibrary({ libraryPath: path.join(repoHome(repo), "library.md") }), jobs: repoJobs, apiToken, appleProject: await hasAppleProject(repo), remoteHost: { enabled: remoteHost.enabled, target: remoteHost.target } });
     return;
   }
+  if (method === "GET" && url.pathname === "/api/analytics") {
+    const ids = Object.keys(roster) as PersonaId[];
+    const analytics = await Promise.all(ids.map(async (id) => {
+      const profile = await readPersona(repo, id);
+      return { persona: id, name: roster[id].name, modelStats: profile.modelStats ?? [] };
+    }));
+    json(res, 200, { repo, personas: analytics });
+    return;
+  }
   if (url.pathname === "/api/options/mac-host") {
     if (method === "GET") {
       const host = await readRemoteBuildHost();
