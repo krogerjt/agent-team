@@ -11,7 +11,7 @@ export class AnthropicProvider implements ToolCapableProvider {
     const started = performance.now();
     const response = await this.client.messages.create({
       model: this.model,
-      max_tokens: 2048,
+      max_tokens: request.maxOutputTokens ?? 2048,
       system: request.systemPrompt,
       messages: [{ role: "user", content: request.images?.length ? [
         ...request.images.map((item) => ({ type: "image" as const, source: { type: "base64" as const, media_type: item.mimeType, data: item.data } })),

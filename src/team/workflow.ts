@@ -439,10 +439,17 @@ async function finishRun(state: TeamRunState, providers: TeamProviders, library:
   }
   {
     const taskSummary = state.tasks.map((item) => `${item.id}: ${item.status}; checks: ${item.checks?.map((check) => `${check.name} ${check.status}`).join(", ")}; review: ${item.review ?? "none"}; QA: ${item.qa ?? "none"}`).join("\n") + (state.integrationChecks ? `\nThis run was updated against newer repository code. Task notes above describe the original build. Checks on the combined code: ${JSON.stringify(state.integrationChecks)}` : "");
-    const finalDiff = await git(state.staging!.path, ["diff", "--no-ext-diff", `${state.baseCommit}..HEAD`, "--", "."]);
+    const fullDiff = await git(state.staging!.path, ["diff", "--no-ext-diff", `${state.baseCommit}..HEAD`, "--", "."]);
+    const diffStat = await git(state.staging!.path, ["diff", "--no-ext-diff", "--stat=160", `${state.baseCommit}..HEAD`, "--", "."]);
+    const finalDiff = fullDiff.length <= 24_000 ? fullDiff : `${fullDiff.slice(0, 24_000)}
+... diff truncated at 24000 of ${fullDiff.length} characters; the changed-files list covers every file.`;
     state.summary = (await generateFor(state, "marlow", providers.marlow, {
       systemPrompt: `${roster.marlow.systemPrompt}\n${await personaContext(state.repo, "marlow")}`,
-      userPrompt: `Summarize the completed goal and what the user should review before merging. Goal: ${state.goal}\nPlan: ${JSON.stringify(state.plan)}\nTasks:\n${taskSummary}\nPreview: ${JSON.stringify(state.preview ? { status: state.preview.status, browserResults: state.preview.browserResults, visualReview: state.preview.visualReview, visualVerified: state.preview.visualVerified } : "not applicable")}\nFinal diff:\n${finalDiff.slice(0, 24_000)}`,
+      maxOutputTokens: 4096,
+      userPrompt: `Summarize the completed goal and what the user should review before merging. Keep it short: one sentence on what was built, then at most 6 bullets covering what to check by hand and any real risks. No preamble, no nested lists. If the diff below was truncated, say so in one line and use the changed-files list for what you could not read. Goal: ${state.goal}\nPlan: ${JSON.stringify(state.plan)}\nTasks:\n${taskSummary}\nPreview: ${JSON.stringify(state.preview ? { status: state.preview.status, browserResults: state.preview.browserResults, visualReview: state.preview.visualReview, visualVerified: state.preview.visualVerified } : "not applicable")}\nChanged files:
+${diffStat}
+Final diff:
+${finalDiff}`,
     })).text;
     state.memoryNote = (await generateFor(state, "tove", providers.tove, {
       systemPrompt: `${roster.tove.systemPrompt}\n${await personaContext(state.repo, "tove")}`,

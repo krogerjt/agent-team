@@ -1,6 +1,7 @@
 export interface ModelRequest {
   systemPrompt: string;
   userPrompt: string;
+  maxOutputTokens?: number;
   images?: Array<{ mimeType: "image/png" | "image/jpeg" | "image/webp"; data: string }>;
   telemetry?: {
     recordCall: (usage: ModelUsage | undefined, durationMs: number) => void;

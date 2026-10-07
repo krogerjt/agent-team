@@ -16,7 +16,7 @@ export class BedrockProvider implements ToolCapableProvider {
         { text: request.userPrompt },
         ...(request.images ?? []).map((item) => ({ image: { format: item.mimeType.split("/")[1] as "png" | "jpeg" | "webp", source: { bytes: Buffer.from(item.data, "base64") } } })),
       ] }],
-      inferenceConfig: { maxTokens: 2048 },
+      inferenceConfig: { maxTokens: request.maxOutputTokens ?? 2048 },
     }));
     reportModelCall(request, started, response.usage ? { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens, totalTokens: response.usage.totalTokens } : undefined);
     return {
