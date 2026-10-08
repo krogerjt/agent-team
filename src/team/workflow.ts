@@ -15,10 +15,12 @@ import { extractCookbook, readCookbook, saveCookbook, type Cookbook } from "../p
 import { livePreview, startPreview, stopPreview, PreviewFailure, PreviewPause, PreviewStopped, type PreviewInfo } from "../preview/runtime.js";
 import { inspectPreview, runBrowserSteps, screenshotData, type BrowserStep } from "../preview/browser.js";
 import { buildEnvironmentTools, executeBuildEnvironmentTool } from "./environment-tools.js";
+import { executeIosTool, iosTools, isIosTool } from "../ios/tools.js";
 import { maxParallelTasks, toolLoopLimits } from "../config.js";
 import { serialize } from "./serial.js";
 
-export type TeamProviders = Record<PersonaId, ModelProvider>;
+/** Hollis (iOS release engineer) is optional so existing provider sets stay valid. */
+export type TeamProviders = Record<Exclude<PersonaId, "hollis">, ModelProvider> & { hollis?: ModelProvider };
 const stopPreviewTool = { name: "stop_preview", description: "Stop the local preview for this run when it is no longer needed.", parameters: { type: "object", properties: {}, required: [], additionalProperties: false } };
 const startPreviewTool = { name: "start_preview", description: "Start or inspect the staged web preview. The host follows Piper's cookbook and waits for it to become healthy.", parameters: { type: "object", properties: {}, required: [], additionalProperties: false } };
 
@@ -80,7 +82,7 @@ async function askWithTools(
   const response = await generateToolsFor(state, persona, provider, {
     systemPrompt: `${roster[persona].systemPrompt}\n${personal}`,
     userPrompt: prompt,
-    tools: [...tools.definitions, ...memoryTools, ...buildEnvironmentTools(writable), stopPreviewTool, ...(state.tasks.length && state.tasks.every((task) => task.status === "done") && persona !== "piper" ? [startPreviewTool] : [])],
+    tools: [...tools.definitions, ...memoryTools, ...buildEnvironmentTools(writable), ...(persona === "hollis" ? iosTools() : []), stopPreviewTool, ...(state.tasks.length && state.tasks.every((task) => task.status === "done") && persona !== "piper" ? [startPreviewTool] : [])],
     execute: async (name, args) => {
       if (name === "stop_preview") { await stopPreview(state.id); if (state.preview) { state.preview.status = "stopped"; state.preview.url = undefined; await saveState(state); } return { content: "Preview stopped." }; }
       if (name === "start_preview") {
@@ -98,6 +100,7 @@ async function askWithTools(
         files: typeof args.path === "string" ? [args.path] : [],
       });
       else await logEvent(state, persona, "tool", `${name} ${JSON.stringify(args).slice(0, 300)}`);
+      if (persona === "hollis" && isIosTool(name)) return executeIosTool(name, args, { root: tools.root, repo: state.repo, writable: writable || tools.root !== state.repo, runDir: state.runDir });
       if (name === "inspect_build_environment" || name === "run_checks") return executeBuildEnvironmentTool(name, tools.root, state.repo, writable, { runDir: state.runDir, taskId: taskId ?? state.tasks.find((task) => task.status === "doing")?.id });
       return tools.execute(name, args);
     },
@@ -565,9 +568,11 @@ export async function chatTeamPersona(repo: string, persona: PersonaId, message:
   const response = await trackedGenerateWithTools(repo, persona, await effectiveModel(repo, persona), provider, {
     systemPrompt: `${roster[persona].systemPrompt}\n${personal}`,
     userPrompt: `Recent conversation:\n${history || "(none)"}\nShared repository library:\n${library || "(empty)"}\nUser: ${message}\nReply as ${roster[persona].name}. You may inspect the repository, but do not edit files.`,
-    tools: [...tools.definitions, ...memoryTools, ...buildEnvironmentTools(false)],
+    tools: [...tools.definitions, ...memoryTools, ...buildEnvironmentTools(false), ...(persona === "hollis" ? iosTools() : [])],
     execute: (name, args) => name === "search_memory" || name === "get_memory_entry"
       ? executeMemoryTool(repo, persona, name, args)
+      : persona === "hollis" && isIosTool(name)
+        ? executeIosTool(name, args, { root: repo, repo, writable: false })
       : name === "inspect_build_environment"
         ? executeBuildEnvironmentTool(name, repo, repo, false)
         : tools.execute(name, args),

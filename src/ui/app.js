@@ -10,8 +10,9 @@ const colors = {
   rowan: ["#b460a5", "#6b4430", "#78437c", "#a6704c"],
   tove: ["#b5c9ed", "#f6d06f", "#8faee0", "#f0cba9"],
   piper: ["#78bd91", "#b74731", "#356c57", "#efbd9f"],
+  hollis: ["#e0a458", "#2f2a35", "#34506b", "#d9a98a"],
 };
-const moods = { marlow: "Every good build begins with a plan.", juniper: "The answer is probably in the codebase.", kit: "Give me a problem and a test bench.", wren: "The details are the experience.", rowan: "Let's make this hold up under review.", tove: "I'll make sure we remember what matters.", piper: "Let me get the workshop running." };
+const moods = { marlow: "Every good build begins with a plan.", juniper: "The answer is probably in the codebase.", kit: "Give me a problem and a test bench.", wren: "The details are the experience.", rowan: "Let's make this hold up under review.", tove: "I'll make sure we remember what matters.", piper: "Let me get the workshop running.", hollis: "Verified, then shipped." };
 const escapeHtml = (value = "") => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 const $ = (selector) => document.querySelector(selector);
 const el = (tag, className, content) => { const node = document.createElement(tag); node.className = className; node.textContent = content; return node; };
