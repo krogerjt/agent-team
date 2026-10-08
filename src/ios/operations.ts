@@ -137,7 +137,7 @@ function planFor(request: OperationRequest, discovery: IosDiscovery, gate: Gate,
       if (teamId && !/^[A-Z0-9]{10}$/.test(teamId)) throw new Error("Invalid Team ID.");
       return { needsSource: false, usesProjectSecrets: false, needsApiKey: gate.useApiKey, releaseId: archiveId,
         steps: [{ before: `cat > ${plist} <<'EXPORT_OPTIONS_PLIST'\n${cmd.exportOptionsPlist(teamId)}EXPORT_OPTIONS_PLIST\nrm -rf ${exportDir}`, command: cmd.exportCommand(archive, exportDir, plist, signing) }],
-        verify: `${succeeded("EXPORT")}\nIPA=$(ls ${exportDir}/*.ipa 2>/dev/null | head -1)\n${mark("IPA", `[ -n "$IPA" ] && [ -s "$IPA" ] && unzip -l "$IPA" 2>/dev/null | grep -q 'Payload/.*\\.app/'`, '"${IPA#"$HOME"/}"')}` };
+        verify: `${succeeded("EXPORT")}\nIPA=$(ls ${exportDir}/*.ipa 2>/dev/null | head -1)\n${mark("IPA", `[ -n "$IPA" ] && [ -s "$IPA" ] && [ "$(unzip -l "$IPA" 2>/dev/null | grep -c 'Payload/.*\\.app/')" -gt 0 ]`, '"${IPA#"$HOME"/}"')}` };
     }
     case "upload": {
       const exportInfo = deps.state.lastExport!;

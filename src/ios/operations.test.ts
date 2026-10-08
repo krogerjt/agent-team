@@ -181,6 +181,8 @@ test("export requires an archive from the current tree, produces an export-only 
     const script = m.mainScripts.at(-1)!;
     assert.match(script, /<key>destination<\/key><string>export<\/string>/); assert.match(script, /<key>teamID<\/key><string>ABCDE12345/);
     assert.match(script, /-exportArchive/); assert.doesNotMatch(script, /--upload-app/);
+    // `grep -q` closes the pipe early, and with pipefail that can fail a perfectly good ipa check; count matches instead.
+    assert.match(script, /grep -c 'Payload\/\.\*\\\.app\/'\)" -gt 0/); assert.doesNotMatch(script, /unzip -l[^\n]*grep -q/);
     const noIpa = mac(repo, () => reply({ SUCCEEDED: "1" }, "** EXPORT SUCCEEDED **"));
     assert.equal((await runIosOperation(repo.root, d, { operation: "export" }, noIpa.deps({ settings: signing, state: stateWith({ lastArchive: { archivePath: "a", treeHash: ctx.treeHash, at: "", id: "arch1" } }) }))).failureClass, "verification");
   } finally { await repo.cleanup(); }
