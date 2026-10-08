@@ -10,6 +10,7 @@ import { messageTeamPersona } from "../team/workflow.js";
 import { git } from "../coding/git.js";
 import { executeIosTool, IOS_TOOL_NAMES, iosTools } from "./tools.js";
 import { buildProgress, resumeBlockedSteps, satisfiedBlockers } from "./session.js";
+import { redactDeep } from "./redact.js";
 import { readIosState, saveIosSettings, setIosPermission, validateSettings } from "./store.js";
 import { healthyApp, iosRepo, withData, type IosRepo } from "./test-helpers.js";
 
@@ -124,6 +125,25 @@ test("resume after a blocker: the user fixes it, recheck unblocks only that step
       const archive = status.steps.find((s: { step: string }) => s.step === "archive");
       assert.equal(archive.status, "pending"); assert.match(archive.summary, /Unblocked/);
       assert.equal(status.steps.find((s: { step: string }) => s.step === "submit").status, "manual");
+    });
+  } finally { await repo.cleanup(); }
+});
+
+test("tool output with API-key command lines is valid JSON, keeps $VAR references, and still hides real secrets", async () => {
+  const repo = await iosRepo(healthyApp());
+  try {
+    await withData(repo, async () => {
+      await saveRemoteBuildHost({ enabled: true, target: "build-mac", root: ".agent-team-builder" });
+      await saveIosSettings(repo.root, { apiKey: { keyIdSecret: "asc-key-id", issuerIdSecret: "asc-issuer-id", privateKeySecret: "asc-p8" } });
+      await setIosPermission(repo.root, "signing", true); await setIosPermission(repo.root, "upload", true);
+      const archive = await executeIosTool("ios_run_operation", { operation: "archive", dryRun: true }, ctx(repo));
+      const parsed = JSON.parse(archive.content); // the original bug made this throw
+      assert.equal(parsed.status, "dry-run");
+      assert.match(parsed.commands.join(" "), /-authenticationKeyID \$ASC_KEY_ID/);
+      assert.doesNotMatch(archive.content, /\[redacted\]/);
+      const scrubbed = JSON.stringify(redactDeep({ output: "altool --apiKey ABC123DEF4 --apiIssuer 69a6de70-03db-47e3-e053-5b8c7c11a4d1 password=hunter22", list: ["token: abc.def"] }));
+      assert.doesNotThrow(() => JSON.parse(scrubbed));
+      for (const secret of ["ABC123DEF4", "69a6de70", "hunter22"]) assert.ok(!scrubbed.includes(secret), secret);
     });
   } finally { await repo.cleanup(); }
 });

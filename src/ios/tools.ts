@@ -4,7 +4,7 @@ import { sshScript, type RemoteScriptRunner } from "../remote/executor.js";
 import { auditRelease, type AuditEvidence } from "./audit.js";
 import { discoverIosProject } from "./discovery.js";
 import { buildReport, type Report } from "./report.js";
-import { redactSecrets } from "./redact.js";
+import { redactDeep } from "./redact.js";
 import { inspectIosReadiness } from "./readiness.js";
 import { captureRunContext, runIosOperation, type OperationDeps } from "./operations.js";
 import { bumpVersion, generateReleaseTemplates, screenshotRequirements, submissionChecklist, validateReleaseFiles } from "./prepare.js";
@@ -78,7 +78,8 @@ async function operationDeps(ctx: IosToolContext): Promise<OperationDeps> {
 }
 
 function done(value: unknown, isError = false): ToolResult {
-  return { content: redactSecrets(JSON.stringify(value)).slice(0, 60_000), isError };
+  // Redact the values, not the serialized text: scrubbing JSON text can eat quotes and commas and corrupt it.
+  return { content: JSON.stringify(redactDeep(value)).slice(0, 60_000), isError };
 }
 
 async function note(ctx: IosToolContext, step: StepId, report: Report<unknown>, treeHash: string): Promise<void> {
