@@ -35,8 +35,8 @@ async function main(): Promise<void> {
   audit                            Release-readiness audit
   status [--recheck]               Release progress; --recheck resumes after you fix a blocker
   preflight                        Dry run of archive/export/upload (changes nothing)
-  prepare <increment-build|set-marketing-version|generate-templates|validate-files|checklist> [--apply] [--marketing-version 1.2.0]
-  run <generate-project|build-simulator|test-simulator|build-release|install-device|archive|export|upload> [--dry-run] [--scheme S] [--test-scope unit|ui|all] [--validate-only]
+  prepare <increment-build|set-marketing-version|generate-templates|validate-files|checklist|collect-screenshots> [--apply] [--marketing-version 1.2.0]
+  run <generate-project|build-simulator|test-simulator|build-release|install-device|archive|export|upload> [--dry-run] [--scheme S] [--test-scope unit|ui|all] [--simulator "iPhone 17 Pro Max"] [--capture-screenshots] [--validate-only]
   settings [--team ID] [--scheme S] [--device UDID] [--api-key-id-secret N --api-issuer-secret N --api-key-secret N]
   grant <signing|upload>           YOU grant a permission; agents cannot
   revoke <signing|upload>
@@ -56,7 +56,7 @@ Submitting for App Review is never automated.`);
   }
   if (command === "run") {
     if (!sub) throw new Error("Choose an operation.");
-    const result = await executeIosTool("ios_run_operation", { operation: sub, dryRun: args.includes("--dry-run"), scheme: optional(args, "--scheme"), testScope: optional(args, "--test-scope"), validateOnly: args.includes("--validate-only") }, ctx);
+    const result = await executeIosTool("ios_run_operation", { operation: sub, dryRun: args.includes("--dry-run"), scheme: optional(args, "--scheme"), testScope: optional(args, "--test-scope"), simulator: optional(args, "--simulator"), captureScreenshots: args.includes("--capture-screenshots"), validateOnly: args.includes("--validate-only") }, ctx);
     show(result.content, true);
     if (result.isError) process.exitCode = 1;
     return;

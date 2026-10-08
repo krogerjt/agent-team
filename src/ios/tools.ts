@@ -8,6 +8,7 @@ import { redactSecrets } from "./redact.js";
 import { inspectIosReadiness } from "./readiness.js";
 import { captureRunContext, runIosOperation, type OperationDeps } from "./operations.js";
 import { bumpVersion, generateReleaseTemplates, screenshotRequirements, submissionChecklist, validateReleaseFiles } from "./prepare.js";
+import { collectScreenshots } from "./screenshots.js";
 import { buildProgress, resumeAfterBlocker, satisfiedBlockers } from "./session.js";
 import { readIosState, recordStep, type IosReleaseState } from "./store.js";
 import type { Finding, IosDiscovery, OperationName, StepId } from "./types.js";
@@ -30,13 +31,13 @@ const readTools: ToolDefinition[] = [
 const operationTool: ToolDefinition = {
   name: "ios_run_operation",
   description: "Run one typed iOS operation on the Mac Build Host against this exact worktree: generate-project (XcodeGen), build-simulator (unsigned), test-simulator (XCTest on an available simulator; captures summary, screenshots, diagnostics), build-release (signed), install-device (build/install/launch on a connected iPhone), archive, export (export only), upload (App Store Connect; validateOnly=true only validates). Success is reported only when the command exits 0 AND its output is verified. archive/export/build-release/install-device need the user's signing permission and upload needs the user's upload permission; you cannot grant them. Use dryRun=true to preview without touching the Mac. This tool never submits for App Review.",
-  parameters: schema({ operation: { type: "string", enum: OPERATIONS }, dryRun: { type: "boolean" }, scheme: { type: "string" }, testScope: { type: "string", enum: ["unit", "ui", "all"] }, validateOnly: { type: "boolean" } }, ["operation"]),
+  parameters: schema({ operation: { type: "string", enum: OPERATIONS }, dryRun: { type: "boolean" }, scheme: { type: "string" }, testScope: { type: "string", enum: ["unit", "ui", "all"] }, simulator: { type: "string", description: "Simulator model name, for example iPhone 17 Pro Max." }, captureScreenshots: { type: "boolean", description: "Run the UI tests that save App Store screenshots." }, validateOnly: { type: "boolean" } }, ["operation"]),
 };
 
 const prepareTool: ToolDefinition = {
   name: "ios_prepare_release",
-  description: "Release preparation actions. increment-build and set-marketing-version edit literal version values (dryRun defaults to true; pass dryRun=false to write, only when asked). generate-templates creates release/ metadata, privacy-policy and support starters, review notes, export-compliance notes and a checklist without overwriting existing files; every value that needs the user is a [[REQUIRES USER INPUT]] placeholder (never invent legal text, URLs, copyright owners, pricing or Apple account details). validate-files checks that release files exist and have no placeholders. checklist returns the submission checklist.",
-  parameters: schema({ action: { type: "string", enum: ["increment-build", "set-marketing-version", "generate-templates", "validate-files", "checklist"] }, marketingVersion: { type: "string" }, dryRun: { type: "boolean" } }, ["action"]),
+  description: "Release preparation actions. increment-build and set-marketing-version edit literal version values (dryRun defaults to true; pass dryRun=false to write, only when asked). generate-templates creates release/ metadata, privacy-policy and support starters, review notes, export-compliance notes and a checklist without overwriting existing files; every value that needs the user is a [[REQUIRES USER INPUT]] placeholder (never invent legal text, URLs, copyright owners, pricing or Apple account details). validate-files checks that release files exist and have no placeholders. checklist returns the submission checklist. collect-screenshots turns the screenshots from the latest captureScreenshots UI-test run into opaque, correctly sized PNGs under release/screenshots/ (dry run by default).",
+  parameters: schema({ action: { type: "string", enum: ["increment-build", "set-marketing-version", "generate-templates", "validate-files", "checklist", "collect-screenshots"] }, marketingVersion: { type: "string" }, dryRun: { type: "boolean" } }, ["action"]),
 };
 
 export const IOS_TOOL_NAMES = [...readTools, operationTool, prepareTool].map((tool) => tool.name);
@@ -64,7 +65,8 @@ function evidenceFrom(state: IosReleaseState, treeHash: string, discovery: IosDi
   const t = outcome("test-simulator");
   return {
     unitTests: t && (scope === "unit" || scope === "all") && discovery.testTargets.unit.length ? t : undefined,
-    uiTests: t && (scope === "ui" || scope === "all") && discovery.testTargets.ui.length ? t : undefined,
+    // UI tests may skip themselves in a plain run, so only an explicit UI run counts as UI evidence.
+    uiTests: t && scope === "ui" && discovery.testTargets.ui.length ? t : undefined,
     simulatorBuild: outcome("build-simulator"),
     deviceTest: outcome("install-device"),
     lastUploadedBuild: state.lastUpload && state.lastUpload.marketingVersion === discovery.appTarget?.marketingVersion ? state.lastUpload.buildNumber : undefined,
@@ -153,6 +155,10 @@ export async function executeIosTool(name: string, args: Record<string, unknown>
       const report = buildReport("Release files", findings);
       return done({ ok: report.ok && report.counts.pending === 0, counts: report.counts, findings, report: report.text });
     }
+    if (action === "collect-screenshots") {
+      const result = await collectScreenshots(ctx.repo, ctx.root, { dryRun });
+      return done({ ...result, note: dryRun ? (ctx.writable ? "Dry run. Pass dryRun=false to write." : "Read-only workspace: nothing was written.") : "Written to release/screenshots/. Review them, then commit." });
+    }
     if (action === "checklist") {
       const audit = await auditRelease(ctx.root, discovery, evidenceFrom(await readIosState(ctx.repo), context.treeHash, discovery));
       return done({ checklist: submissionChecklist(discovery, audit.findings.filter((finding) => finding.status !== "passed").map((finding) => `${finding.status.toUpperCase()}: ${finding.title} — ${finding.detail}`)) });
@@ -162,6 +168,6 @@ export async function executeIosTool(name: string, args: Record<string, unknown>
   // ios_run_operation
   const operation = String(args.operation) as OperationName;
   if (!OPERATIONS.includes(operation)) throw new Error(`Unknown operation: ${operation}`);
-  const result = await runIosOperation(ctx.root, discovery, { operation, dryRun: args.dryRun === true, scheme: typeof args.scheme === "string" ? args.scheme : undefined, testScope: args.testScope as "unit" | "ui" | "all" | undefined, validateOnly: args.validateOnly === true }, await operationDeps(ctx));
+  const result = await runIosOperation(ctx.root, discovery, { operation, dryRun: args.dryRun === true, scheme: typeof args.scheme === "string" ? args.scheme : undefined, testScope: args.testScope as "unit" | "ui" | "all" | undefined, simulator: typeof args.simulator === "string" ? args.simulator : undefined, captureScreenshots: args.captureScreenshots === true, validateOnly: args.validateOnly === true }, await operationDeps(ctx));
   return done(result, result.status === "failed" || result.status === "blocked");
 }

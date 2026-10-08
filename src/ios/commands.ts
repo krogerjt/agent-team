@@ -5,13 +5,19 @@ import type { FailureClass, OperationName } from "./types.js";
 /** A literal argument (always shell-quoted), a reference to an environment variable resolved on the Mac, or a trusted internal fragment. */
 export type Arg = string | { env: string } | { shell: string; display: string };
 
-export interface RemoteCommand { label: string; argv: Arg[]; timeoutMs: number }
+/** `env` entries are constant, internally chosen NAME=value pairs (never secrets) placed before the executable. */
+export interface RemoteCommand { label: string; argv: Arg[]; timeoutMs: number; env?: Record<string, string> }
 
 export function renderArg(arg: Arg): string { return typeof arg === "string" ? quote(arg) : "env" in arg ? `"$${arg.env}"` : arg.shell; }
-export function renderCommand(command: RemoteCommand): string { return command.argv.map(renderArg).join(" "); }
+function envPrefix(command: RemoteCommand): string {
+  const entries = Object.entries(command.env ?? {});
+  for (const [name, value] of entries) if (!/^[A-Z][A-Z0-9_]{0,60}$/.test(name) || !/^[A-Za-z0-9_.-]{0,60}$/.test(value)) throw new Error(`Invalid command environment: ${name}`);
+  return entries.length ? `env ${entries.map(([name, value]) => `${name}=${value}`).join(" ")} ` : "";
+}
+export function renderCommand(command: RemoteCommand): string { return envPrefix(command) + command.argv.map(renderArg).join(" "); }
 /** Human display: environment references are shown by name, never by value. */
 export function displayCommand(command: RemoteCommand): string {
-  return command.argv.map((arg) => typeof arg === "string" ? (/^[\w@%+=:,./-]+$/.test(arg) ? arg : quote(arg)) : "env" in arg ? `$${arg.env}` : arg.display).join(" ");
+  return envPrefix(command) + command.argv.map((arg) => typeof arg === "string" ? (/^[\w@%+=:,./-]+$/.test(arg) ? arg : quote(arg)) : "env" in arg ? `$${arg.env}` : arg.display).join(" ");
 }
 
 const SAFE_NAME = /^[A-Za-z0-9_. -]{1,100}$/;
@@ -43,8 +49,9 @@ export function simulatorBuild(container: Container, scheme: string, cache: stri
   return { label: `xcodebuild ${scheme} (iOS Simulator, unsigned)`, argv: ["xcodebuild", ...base(container, scheme), "-configuration", "Debug", "-destination", "generic/platform=iOS Simulator", ...derivedData(cache), "build", "CODE_SIGNING_ALLOWED=NO"], timeoutMs: 900_000 };
 }
 
-export function simulatorTest(container: Container, scheme: string, destination: string, resultBundle: string, cache: string, onlyTesting: string[] = []): RemoteCommand {
-  return { label: `xcodebuild ${scheme} tests (iOS Simulator)`, argv: ["xcodebuild", ...base(container, scheme), "-destination", destination, ...derivedData(cache), "-resultBundlePath", { shell: resultBundle, display: "<job>/result.xcresult" }, "-enableCodeCoverage", "YES", ...onlyTesting.map((name) => `-only-testing:${requireSafe(name, SAFE_NAME, "test target")}`), "test", "CODE_SIGNING_ALLOWED=NO"], timeoutMs: 1_800_000 };
+export function simulatorTest(container: Container, scheme: string, destination: string, resultBundle: string, cache: string, onlyTesting: string[] = [], captureScreenshots = false): RemoteCommand {
+  // xcodebuild forwards TEST_RUNNER_-prefixed variables to the test process with the prefix removed.
+  return { ...(captureScreenshots ? { env: { TEST_RUNNER_CAPTURE_SCREENSHOTS: "1" } } : {}), label: `xcodebuild ${scheme} tests (iOS Simulator)`, argv: ["xcodebuild", ...base(container, scheme), "-destination", destination, ...derivedData(cache), "-resultBundlePath", { shell: resultBundle, display: "<job>/result.xcresult" }, "-enableCodeCoverage", "YES", ...onlyTesting.map((name) => `-only-testing:${requireSafe(name, SAFE_NAME, "test target")}`), "test", "CODE_SIGNING_ALLOWED=NO"], timeoutMs: 1_800_000 };
 }
 
 export interface SigningOptions { teamId?: string; useApiKey: boolean }
@@ -94,8 +101,16 @@ export function deviceLaunch(udid: string, bundleId: string): RemoteCommand {
 // Simulator and device selection
 // ---------------------------------------------------------------------------------------------------------------
 
-export function pickSimulator(devicesJson: string): string | undefined {
-  try { return selectSimulatorDestination(devicesJson, "iOS"); } catch { return undefined; }
+export function pickSimulator(devicesJson: string, name?: string): string | undefined {
+  try {
+    if (!name) return selectSimulatorDestination(devicesJson, "iOS");
+    // A named device (for example the 6.9-inch iPhone used for App Store screenshots): newest runtime first, booted preferred.
+    const parsed = JSON.parse(devicesJson) as { devices?: Record<string, Array<{ isAvailable?: boolean; name?: string; udid?: string; state?: string }>> };
+    const matches = Object.entries(parsed.devices ?? {}).filter(([runtime]) => runtime.includes(".iOS-")).sort(([a], [b]) => b.localeCompare(a, undefined, { numeric: true }))
+      .flatMap(([, devices]) => devices).filter((device) => device.isAvailable !== false && device.udid && device.name === name);
+    const chosen = matches.find((device) => device.state === "Booted") ?? matches[0];
+    return chosen?.udid ? `platform=iOS Simulator,id=${chosen.udid}` : undefined;
+  } catch { return undefined; }
 }
 
 export interface DeviceInfo { name: string; os: string; udid: string }

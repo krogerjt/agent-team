@@ -28,7 +28,7 @@ export interface OperationDeps {
   persist?: boolean;
 }
 
-export interface OperationRequest { operation: OperationName; dryRun?: boolean; scheme?: string; validateOnly?: boolean; testScope?: "unit" | "ui" | "all" }
+export interface OperationRequest { operation: OperationName; dryRun?: boolean; scheme?: string; validateOnly?: boolean; testScope?: "unit" | "ui" | "all"; /** Simulator model name, for example "iPhone 17 Pro Max". */ simulator?: string; /** Runs UI tests that save App Store screenshots (they skip themselves otherwise). */ captureScreenshots?: boolean }
 
 /** Identity of the exact tree an operation used, so evidence is never attributed to different code. */
 export async function captureRunContext(root: string): Promise<RunContext> {
@@ -64,6 +64,7 @@ export function gateOperation(request: OperationRequest, discovery: IosDiscovery
   const op = request.operation;
   if (!deps.host.enabled || !deps.host.target) return block("environment", "No Mac Build Host is enabled.", "Open Workshop Options → Mac Build Host, save the SSH alias, test it, and enable it.");
   if (discovery.blockers.length) return block("environment", discovery.blockers.map((b) => b.title).join("; "), discovery.blockers.map((b) => b.remedy).filter(Boolean).join(" "));
+  if (request.simulator !== undefined && !/^[A-Za-z0-9 ().-]{1,60}$/.test(request.simulator)) return block("environment", "The simulator name is not valid.", "Use a simulator model name such as iPhone 17 Pro Max.");
   const scheme = resolveScheme(request, discovery, settings);
   const needsProject = op !== "export" && op !== "upload";
   if (needsProject && !scheme) return block("environment", "No scheme could be determined.", "Save a scheme in iOS release settings, or add a shared scheme to the project.");
@@ -113,8 +114,8 @@ function planFor(request: OperationRequest, discovery: IosDiscovery, gate: Gate,
     case "build-simulator":
       return { ...base, steps: [...generate, { command: cmd.simulatorBuild(container!, scheme, paths.cache) }], verify: `${succeeded("BUILD")}\n${mark("APP", `[ -n "$(find ${built("Debug-iphonesimulator")} -maxdepth 1 -name '*.app' 2>/dev/null | head -1)" ]`)}` };
     case "test-simulator": {
-      const only = request.testScope === "unit" ? discovery.testTargets.unit : request.testScope === "ui" ? discovery.testTargets.ui : [];
-      return { ...base, steps: [...generate, { command: cmd.simulatorTest(container!, scheme, extra.simulatorDestination ?? SIM_PLACEHOLDER, `${paths.job}/result.xcresult`, paths.cache, only) }], verify: `${succeeded("TEST")}\n${mark("XCRESULT", `[ -d ${paths.job}/result.xcresult ]`)}` };
+      const only = request.testScope === "unit" ? discovery.testTargets.unit : request.testScope === "ui" || request.captureScreenshots ? discovery.testTargets.ui : [];
+      return { ...base, steps: [...generate, { command: cmd.simulatorTest(container!, scheme, extra.simulatorDestination ?? SIM_PLACEHOLDER, `${paths.job}/result.xcresult`, paths.cache, only, request.captureScreenshots) }], verify: `${succeeded("TEST")}\n${mark("XCRESULT", `[ -d ${paths.job}/result.xcresult ]`)}` };
     }
     case "build-release":
       return { ...base, needsApiKey: gate.useApiKey, steps: [...generate, { command: cmd.releaseBuild(container!, scheme, paths.cache, signing) }], verify: `${succeeded("BUILD")}\n${mark("CODESIGN", `APP=$(find ${built("Release-iphoneos")} -maxdepth 1 -name '*.app' 2>/dev/null | head -1); [ -n "$APP" ] && /usr/bin/codesign --verify --deep --strict "$APP" 2>/dev/null`)}` };
@@ -234,7 +235,7 @@ async function persistResult(request: OperationRequest, discovery: IosDiscovery,
   const step = stepFor[request.operation];
   const at = new Date().toISOString();
   if (step) await recordStep(deps.repo, {
-    step, at, summary: result.summary, treeHash: context.treeHash, ...(request.operation === "test-simulator" ? { scope: request.testScope ?? "all" } : {}),
+    step, at, summary: result.summary, treeHash: context.treeHash, ...(request.operation === "test-simulator" ? { scope: request.captureScreenshots ? "ui" : request.testScope ?? "all" } : {}),
     status: result.status === "success" ? "passed" : result.status === "blocked" ? "blocked" : "failed",
     ...(result.status === "success" ? {} : { blockers: [{ id: blockerId(result), remedy: result.remedy ?? "", kind: result.failureClass === "compile-error" || result.failureClass === "test-failure" ? "code" as const : result.failureClass === "permission-denied" || result.failureClass === "account-team" || result.failureClass === "credentials-missing" || result.failureClass === "duplicate-build" ? "user-input" as const : "environment" as const }] }),
   });
@@ -281,8 +282,8 @@ export async function runIosOperation(root: string, discovery: IosDiscovery, req
   const run = deps.run ?? sshScript;
   if (op === "test-simulator" && !request.dryRun) {
     const devices = await run(deps.host, "xcrun simctl list devices available --json\n", 30_000, 4_000_000);
-    simulatorDestination = devices.code === 0 ? cmd.pickSimulator(devices.output) : undefined;
-    if (!simulatorDestination) return finish({ operation: op, status: "blocked", verified: false, summary: `No available iOS simulator was found on ${deps.host.target}.`, failureClass: "environment", remedy: "Install an iOS simulator runtime: Xcode → Settings → Components.", commands: [] });
+    simulatorDestination = devices.code === 0 ? cmd.pickSimulator(devices.output, request.simulator) : undefined;
+    if (!simulatorDestination) return finish({ operation: op, status: "blocked", verified: false, summary: request.simulator ? `No available simulator named "${request.simulator}" was found on ${deps.host.target}.` : `No available iOS simulator was found on ${deps.host.target}.`, failureClass: "environment", remedy: "Install an iOS simulator runtime: Xcode → Settings → Components.", commands: [] });
   }
   if (op === "install-device") {
     if (request.dryRun) deviceUdid = undefined;
@@ -385,7 +386,7 @@ async function collectTestEvidence(deps: OperationDeps, paths: ReturnType<typeof
     artifacts.push(path.join(folder, "summary.json"));
     await run(deps.host, `rm -rf ${paths.job}/attachments; mkdir -p ${paths.job}/attachments; xcrun xcresulttool export attachments --path ${result} --output-path ${paths.job}/attachments >/dev/null 2>&1 || true
 `);
-    await (deps.downloadAttachments ?? downloadAttachments)(deps.host, `${paths.job}/attachments`, path.join(folder, "attachments"));
+    await (deps.downloadAttachments ?? downloadAttachments)(deps.host, `${paths.job}/attachments`, path.join(folder, "attachments"), { includeManifest: true, maxBytes: 60 * 1024 * 1024 });
     artifacts.push(...(await collectFiles(path.join(folder, "attachments"))).slice(0, 20));
   }
   return { result, parsed: parseTestSummary(summary.output), artifacts };

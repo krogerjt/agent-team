@@ -115,10 +115,11 @@ export async function collectFiles(folder: string): Promise<string[]> {
   return found;
 }
 
-export async function downloadAttachments(host: RemoteBuildHost, remoteFolder: string, localFolder: string): Promise<void> {
+export async function downloadAttachments(host: RemoteBuildHost, remoteFolder: string, localFolder: string, options: { maxBytes?: number; includeManifest?: boolean } = {}): Promise<void> {
+  const maxBytes = options.maxBytes ?? 10485760;
   await mkdir(localFolder, { recursive: true });
   await new Promise<void>((resolve) => {
-    const remote = spawn("ssh", sshArgs(host, [`cd ${remoteFolder} 2>/dev/null && { count=0; total=0; find . -type f \\( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' \\) -size -10M -print0 | while IFS= read -r -d '' file; do size=$(stat -f %z "$file" 2>/dev/null || printf 0); [ $((total+size)) -gt 10485760 ] && continue; printf '%s\\0' "$file"; total=$((total+size)); count=$((count+1)); [ "$count" -ge 20 ] && break; done; } | tar -cf - --null -T -`]), { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    const remote = spawn("ssh", sshArgs(host, [`cd ${remoteFolder} 2>/dev/null && { count=0; total=0; find . -type f \\( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg'${options.includeManifest ? " -o -iname 'manifest.json'" : ""} \\) -size -10M -print0 | while IFS= read -r -d '' file; do size=$(stat -f %z "$file" 2>/dev/null || printf 0); [ $((total+size)) -gt ${maxBytes} ] && continue; printf '%s\\0' "$file"; total=$((total+size)); count=$((count+1)); [ "$count" -ge 20 ] && break; done; } | tar -cf - --null -T -`]), { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     const local = spawn("tar", ["-xf", "-", "-C", localFolder], { windowsHide: true, stdio: ["pipe", "ignore", "ignore"] });
     remote.stdout.pipe(local.stdin);
     let remoteDone = false, localDone = false;
