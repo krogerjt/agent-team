@@ -39,7 +39,13 @@ export async function captureRunContext(root: string): Promise<RunContext> {
   const hash = createHash("sha256");
   const files = (await listProjectFiles(root).catch(() => [] as string[])).filter((file) => !file.startsWith("release/") && !file.startsWith("docs/")).sort();
   const contents = await Promise.all(files.map((file) => readFile(path.join(root, file)).catch(() => Buffer.alloc(0))));
-  files.forEach((file, index) => hash.update(file + "|" + contents[index].length + "|").update(contents[index]));
+  files.forEach((file, index) => {
+    // Git on Windows converts line endings when switching branches; that must not change the code identity.
+    const raw = contents[index];
+    const text = !raw.subarray(0, 8000).includes(0);
+    const normalized = text ? Buffer.from(raw.toString("latin1").split(String.fromCharCode(13, 10)).join(String.fromCharCode(10)), "latin1") : raw;
+    hash.update(file + "|" + normalized.length + "|").update(normalized);
+  });
   return { root, commit, dirty: Boolean(status), treeHash: hash.digest("hex"), at: new Date().toISOString() };
 }
 

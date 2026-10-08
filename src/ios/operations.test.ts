@@ -309,6 +309,9 @@ test("code identity follows file contents: committing the same files or editing 
     await mkdir(`${repo.root}/docs`, { recursive: true }); await mkdir(`${repo.root}/release`, { recursive: true });
     await writeFile(`${repo.root}/docs/privacy.md`, "page"); await writeFile(`${repo.root}/release/metadata.json`, "{}");
     assert.equal((await captureRunContext(repo.root)).treeHash, before, "website and store metadata are not code");
+    const swift = await (await import("node:fs/promises")).readFile(`${repo.root}/Acme/AcmeApp.swift`, "utf8");
+    await writeFile(`${repo.root}/Acme/AcmeApp.swift`, swift.split("\n").join("\r\n"));
+    assert.equal((await captureRunContext(repo.root)).treeHash, before, "LF versus CRLF line endings are not a code change");
     await writeFile(`${repo.root}/Acme/AcmeApp.swift`, "// changed\n");
     assert.notEqual((await captureRunContext(repo.root)).treeHash, before, "a code change does change it");
   } finally { await repo.cleanup(); }
