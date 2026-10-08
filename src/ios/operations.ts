@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { git } from "../coding/git.js";
 import { collectFiles, downloadAttachments, quote, remotePaths, sshScript, upload, type RemoteScriptRunner } from "../remote/executor.js";
-import { buildKeychainShell, keychainRedactionScript, keychainSecretLookup } from "../remote/keychain.js";
+import { buildKeychainShell, keychainRedactionPipeline, keychainSecretLookup } from "../remote/keychain.js";
 import type { RemoteBuildHost, RemoteProjectSettings } from "../remote/settings.js";
 import * as cmd from "./commands.js";
 import { xcodebuildContainer, listProjectFiles } from "./discovery.js";
@@ -161,7 +161,7 @@ function renderStep(step: Step): string {
   const rendered = cmd.renderCommand(step.command);
   // Not indented: the export step carries a heredoc whose terminator must start the line.
   const before = step.before ? `${step.before}\n` : "";
-  return `if [ "$code" -eq 0 ]; then\n${before}  printf '\\n$ %s\\n' ${quote(step.command.label)} >>"$output"\n  ${rendered} >>"$output" 2>&1; code=$?\nfi`;
+  return `if [ "$code" -eq 0 ]; then\n${before}  printf '\\n$ %s\\n' ${quote(step.command.label)} >>"$output"\n  ${rendered} >>"$output" 2>&1 </dev/null; code=$?\nfi`;
 }
 
 function buildScript(plan: Plan, deps: Pick<OperationDeps, "host" | "project" | "settings">, id: string, nonce: string): { script: string; redactVars: string[] } {
@@ -186,8 +186,7 @@ export API_PRIVATE_KEYS_DIR="$KEYDIR"`;
   }
   const signedOp = plan.steps.some((step) => step.command.argv.some((arg) => typeof arg === "object" && "shell" in arg && arg.shell.includes("AGENT_TEAM_MAC_KEYCHAIN_PATH")));
   const keychainSearch = signedOp ? `/usr/bin/security list-keychains -d user -s "$AGENT_TEAM_MAC_KEYCHAIN_PATH" $(/usr/bin/security list-keychains -d user | /usr/bin/tr -d '"') >/dev/null 2>&1 || true` : "";
-  const redactions = redactVars.map((variable) => keychainRedactionScript(variable)).join(" | ");
-  const setup = plan.needsSource && deps.project.setupCommand ? `if [ "$code" -eq 0 ]; then printf '\\n$ repository preparation\\n' >>"$output"; ( cd ${paths.source} && ${deps.project.setupCommand} ) >>"$output" 2>&1; code=$?; fi` : "";
+  const setup = plan.needsSource && deps.project.setupCommand ? `if [ "$code" -eq 0 ]; then printf '\\n$ repository preparation\\n' >>"$output"; ( cd ${paths.source} && ${deps.project.setupCommand} ) >>"$output" 2>&1 </dev/null; code=$?; fi` : "";
   const steps = plan.steps.map(renderStep).join("\n");
   const script = `${buildKeychainShell()}
 set -o pipefail
@@ -203,7 +202,7 @@ ${plan.preScript ?? ""}
 ${setup}
 ${steps}
 set -e
-${redactions ? `${redactions} "$output"` : `cat "$output"`}
+${keychainRedactionPipeline(redactVars)}
 printf '\\n@@${nonce}:EXIT=%s\\n' "$code"
 set +e
 if [ "$code" -eq 0 ]; then
@@ -315,7 +314,8 @@ export async function runIosOperation(root: string, discovery: IosDiscovery, req
     const { markers, text } = parseMarkers(execution.output, nonce);
     const output = redactSecrets(text);
     const exitCode = markers.EXIT !== undefined ? Number(markers.EXIT) : execution.code === 0 ? NaN : execution.code;
-    if (!Number.isFinite(exitCode)) return finish({ ...failedFrom(op, commands, output, execution.code), failureClass: "verification", summary: `${op} produced no completion marker, so it is not counted as successful.`, remedy: cmd.remedyFor("verification") });
+    // Without a completion marker we cannot tell what happened, so show the raw end of the output (redacted) to diagnose it.
+    if (!Number.isFinite(exitCode)) return finish({ ...failedFrom(op, commands, `${output}\n--- raw end of remote output (exit ${execution.code}) ---\n` + redactSecrets(execution.output.slice(-1500)), execution.code), failureClass: "verification", summary: `${op} produced no completion marker, so it is not counted as successful.`, remedy: cmd.remedyFor("verification") });
     if (exitCode !== 0) {
       const failure = failedFrom(op, commands, output, exitCode);
       if (op === "test-simulator" && exitCode !== 255 && ![20, 21, 22, 23].includes(exitCode)) {

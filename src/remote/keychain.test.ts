@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { testRemoteBuildHost, type RemoteScriptRunner } from "./executor.js";
-import { buildKeychainShell, DEFAULT_BUILD_KEYCHAIN_PATH, keychainHealthScript, keychainRedactionScript, keychainSecretLookup, keychainSecretStore } from "./keychain.js";
+import { buildKeychainShell, DEFAULT_BUILD_KEYCHAIN_PATH, keychainHealthScript, keychainRedactionPipeline, keychainRedactionScript, keychainSecretLookup, keychainSecretStore } from "./keychain.js";
 
 const host = { enabled: true, target: "builder@mac.local", root: ".agent-team-builder" };
 const healthyMac = "MACOS\t15.0\nXCODE\tXcode 16.0\nSIMULATORS\t1\nTAR\t/usr/bin/tar\nPOD\t/usr/local/bin/pod\nBUNDLE\t/usr/local/bin/bundle\nDISK\t20000000\n";
@@ -45,6 +45,20 @@ test("secret store puts the keychain path last, after -w with a value (BSD getop
   assert.doesNotMatch(store, /"\$AGENT_TEAM_MAC_KEYCHAIN_PATH" -w/);
   const { spawnSync } = await import("node:child_process");
   if (spawnSync("bash", ["-c", "true"]).status === 0) assert.equal(spawnSync("bash", ["-n"], { input: store }).status, 0);
+});
+
+test("redaction pipeline gives the file to the FIRST perl, so later script lines on stdin are never consumed", async () => {
+  assert.equal(keychainRedactionPipeline([], `"$output"`), `cat "$output"`);
+  const two = keychainRedactionPipeline(["ASC_KEY_ID", "ASC_ISSUER_ID"]);
+  assert.match(two, /^perl -0pe '[^']*ASC_KEY_ID[^']*' "\$output" \| perl -0pe '[^']*ASC_ISSUER_ID[^']*'$/);
+  const { spawnSync } = await import("node:child_process");
+  if (spawnSync("bash", ["-c", "command -v perl"]).status !== 0) return;
+  // Reproduce the real shape: the script arrives on stdin and lines after the redaction must still run.
+  const script = ["out=$(mktemp)", "export ASC_KEY_ID=KEY123 ASC_ISSUER_ID=ISSUER456", "printf 'log KEY123 and ISSUER456\\n' > \"$out\"",
+    keychainRedactionPipeline(["ASC_KEY_ID", "ASC_ISSUER_ID"], `"$out"`), "echo MARKER-AFTER-REDACTION", ""].join("\n");
+  const run = spawnSync("bash", ["-s"], { input: script, encoding: "utf8" });
+  assert.match(run.stdout, /log \[redacted\] and \[redacted\]/);
+  assert.match(run.stdout, /MARKER-AFTER-REDACTION/);
 });
 
 test("XcodeGen readiness identifies a missing generator only when the project needs it", async () => {

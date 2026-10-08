@@ -6,7 +6,7 @@ import { git } from "../coding/git.js";
 import type { CheckArtifact, CheckCommand, CheckResult, CheckRunContext } from "../coding/checks.js";
 import { selectSimulatorDestination } from "../coding/apple.js";
 import { readRemoteBuildHost, readRemoteProjectSettings, validateRemoteBuildHost, type RemoteBuildHost } from "./settings.js";
-import { buildKeychainShell, keychainHealthScript, keychainRedactionScript, keychainSecretLookup, keychainSecretStore } from "./keychain.js";
+import { buildKeychainShell, keychainHealthScript, keychainRedactionPipeline, keychainRedactionScript, keychainSecretLookup, keychainSecretStore } from "./keychain.js";
 
 export interface RemoteReadinessItem { name: string; ok: boolean; detail: string }
 export interface RemoteReadiness { ok: boolean; target: string; items: RemoteReadinessItem[] }
@@ -175,7 +175,7 @@ export async function runRemoteChecks(root: string, commands: CheckCommand[], co
       }
       const exports = secretEntries.map(([variable, name]) => `export ${variable}="$(${keychainSecretLookup(name)})" || { printf '%s\\n' ${quote(`Mac Build Keychain secret '${name}' is unavailable.`)} >&2; exit 23; }`).join("\n");
       const redactions = secretEntries.map(([variable]) => keychainRedactionScript(variable)).join(" | ");
-      const script = `${buildKeychainShell()}\nset -o pipefail\n${exports}\ncd ${paths.source}\noutput=$(mktemp)\ntrap 'rm -f "$output"' EXIT\nset +e\n${quote(command.executable)} ${args.map(quote).join(" ")}${buildPaths} >"$output" 2>&1\ncode=$?\nset -e\n${redactions ? `${redactions} "$output"` : `cat "$output"`}\nif [ "$code" -ne 0 ]; then\n  printf '\\nBuild diagnostics:\\n'\n  { grep -E 'error:|fatal error:|BUILD FAILED' "$output" | tail -40 || true; }${redactions ? ` | ${redactions}` : ""}\nfi\nprintf '\\n'\nexit "$code"\n`;
+      const script = `${buildKeychainShell()}\nset -o pipefail\n${exports}\ncd ${paths.source}\noutput=$(mktemp)\ntrap 'rm -f "$output"' EXIT\nset +e\n${quote(command.executable)} ${args.map(quote).join(" ")}${buildPaths} >"$output" 2>&1\ncode=$?\nset -e\n${keychainRedactionPipeline(secretEntries.map(([variable]) => variable))}\nif [ "$code" -ne 0 ]; then\n  printf '\\nBuild diagnostics:\\n'\n  { grep -E 'error:|fatal error:|BUILD FAILED' "$output" | tail -40 || true; }${redactions ? ` | ${redactions}` : ""}\nfi\nprintf '\\n'\nexit "$code"\n`;
       const execution = await sshScript(host, script, command.timeoutMs ?? 600_000);
       const result: CheckResult = { name: command.name, status: execution.code === 0 ? "passed" : "failed", required: true, executor: host.target, output: execution.output.slice(-LIMIT) };
       if (isTest) {

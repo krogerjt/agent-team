@@ -150,6 +150,8 @@ test("archive: credentials are resolved on the Mac by name, redacted, and never 
       assert.match(script, /perl -0pe 's\/\\Q\$ENV\{ASC_KEY_ID\}\\E\/\[redacted\]\/g'/);
       assert.doesNotMatch(script, /BEGIN PRIVATE KEY|--password|-w [A-Za-z0-9+/]{30}/);
       assert.match(script, /DEVELOPMENT_TEAM=ABCDE12345/);
+      // The script arrives on zsh's stdin, so commands must not be able to read it (xcodebuild would swallow later lines).
+      assert.match(script, />>"\$output" 2>&1 <\/dev\/null; code=\$\?/);
       const state = await readIosState(repo.root);
       assert.equal(state.lastArchive?.archivePath, r.outputs?.archivePath);
       assert.equal(state.lastArchive?.treeHash, r.context?.treeHash);

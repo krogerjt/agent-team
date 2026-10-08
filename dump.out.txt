@@ -1,0 +1,54 @@
+set -e
+umask 077
+AGENT_TEAM_MAC_KEYCHAIN_CONFIG="${AGENT_TEAM_MAC_KEYCHAIN_CONFIG:-$HOME/.agent-team/mac-build-host.env}"
+if [ -f "$AGENT_TEAM_MAC_KEYCHAIN_CONFIG" ]; then . "$AGENT_TEAM_MAC_KEYCHAIN_CONFIG"; fi
+AGENT_TEAM_MAC_KEYCHAIN_PATH="${AGENT_TEAM_MAC_KEYCHAIN_PATH:-$HOME/Library/Keychains/agent-team.keychain-db}"
+if [ ! -f "$AGENT_TEAM_MAC_KEYCHAIN_PATH" ]; then
+  printf '%s\n' 'Agent Team Build Keychain is missing. Initialize ~/Library/Keychains/agent-team.keychain-db on the Mac.' >&2
+  exit 20
+fi
+if [ -z "${AGENT_TEAM_MAC_KEYCHAIN_PASSWORD:-}" ]; then
+  printf '%s\n' 'AGENT_TEAM_MAC_KEYCHAIN_PASSWORD is not configured on the Mac. Set it in ~/.agent-team/mac-build-host.env.' >&2
+  exit 21
+fi
+/usr/bin/security unlock-keychain -p "$AGENT_TEAM_MAC_KEYCHAIN_PASSWORD" "$AGENT_TEAM_MAC_KEYCHAIN_PATH" >/dev/null
+/usr/bin/security set-keychain-settings -lut 900 "$AGENT_TEAM_MAC_KEYCHAIN_PATH" >/dev/null
+set -o pipefail
+
+output=$(mktemp)
+trap 'rm -rf "$output"' EXIT
+export ASC_KEY_ID="$(/usr/bin/security find-generic-password -w -a 'asc-key-id' -s 'com.openai.agent-team.remote-build' "$AGENT_TEAM_MAC_KEYCHAIN_PATH")" || { printf '%s\n' 'Mac Build Keychain secret '"'"'asc-key-id'"'"' is unavailable.' >&2; exit 23; }
+export ASC_ISSUER_ID="$(/usr/bin/security find-generic-password -w -a 'asc-issuer-id' -s 'com.openai.agent-team.remote-build' "$AGENT_TEAM_MAC_KEYCHAIN_PATH")" || { printf '%s\n' 'Mac Build Keychain secret '"'"'asc-issuer-id'"'"' is unavailable.' >&2; exit 23; }
+KEYDIR="$HOME"/'.agent-team-builder'/jobs/JOB/private_keys
+mkdir -p "$KEYDIR" && chmod 700 "$KEYDIR"
+trap 'rm -rf "$KEYDIR" "$output"' EXIT
+/usr/bin/security find-generic-password -w -a 'asc-key-p8-b64' -s 'com.openai.agent-team.remote-build' "$AGENT_TEAM_MAC_KEYCHAIN_PATH" | /usr/bin/base64 -D > "$KEYDIR/AuthKey_$ASC_KEY_ID.p8" || { printf '%s\n' 'Mac Build Keychain secret '"'"'asc-key-p8-b64'"'"' is unavailable.' >&2; exit 23; }
+chmod 600 "$KEYDIR/AuthKey_$ASC_KEY_ID.p8"
+export ASC_KEY_PATH="$KEYDIR/AuthKey_$ASC_KEY_ID.p8"
+export API_PRIVATE_KEYS_DIR="$KEYDIR"
+/usr/bin/security list-keychains -d user -s "$AGENT_TEAM_MAC_KEYCHAIN_PATH" $(/usr/bin/security list-keychains -d user | /usr/bin/tr -d '"') >/dev/null 2>&1 || true
+cd "$HOME"/'.agent-team-builder'/jobs/JOB/source
+set +e
+code=0
+mkdir -p "$HOME"/'.agent-team-builder/releases/JOB'
+
+if [ "$code" -eq 0 ]; then
+  printf '\n$ %s\n' 'XcodeGen project generation' >>"$output"
+  'xcodegen' 'generate' '--spec' 'project.yml' >>"$output" 2>&1 </dev/null; code=$?
+fi
+if [ "$code" -eq 0 ]; then
+  printf '\n$ %s\n' 'xcodebuild archive GraveyardTracker' >>"$output"
+  'xcodebuild' '-project' 'GraveyardTracker.xcodeproj' '-scheme' 'GraveyardTracker' '-configuration' 'Release' '-destination' 'generic/platform=iOS' '-archivePath' "$HOME"/'.agent-team-builder/releases/JOB'/App.xcarchive '-derivedDataPath' "$HOME"/'.agent-team-builder'/cache/DerivedData '-allowProvisioningUpdates' '-authenticationKeyPath' "$ASC_KEY_PATH" '-authenticationKeyID' "$ASC_KEY_ID" '-authenticationKeyIssuerID' "$ASC_ISSUER_ID" 'DEVELOPMENT_TEAM=L67J56VPBG' "OTHER_CODE_SIGN_FLAGS=--keychain $AGENT_TEAM_MAC_KEYCHAIN_PATH" 'archive' >>"$output" 2>&1 </dev/null; code=$?
+fi
+set -e
+perl -0pe 's/\Q$ENV{ASC_KEY_ID}\E/[redacted]/g' | perl -0pe 's/\Q$ENV{ASC_ISSUER_ID}\E/[redacted]/g' "$output"
+printf '\n@@NONCE:EXIT=%s\n' "$code"
+set +e
+if [ "$code" -eq 0 ]; then
+if grep -q '\*\* ARCHIVE SUCCEEDED \*\*' "$output"; then printf '@@NONCE:SUCCEEDED=%s\n' 1; fi
+PL="$HOME"/'.agent-team-builder/releases/JOB'/App.xcarchive/Info.plist
+if [ -f "$PL" ] && [ -n "$(ls -d "$HOME"/'.agent-team-builder/releases/JOB'/App.xcarchive/Products/Applications/*.app 2>/dev/null | head -1)" ]; then printf '@@NONCE:ARCHIVE=%s\n' 1; fi
+for K in CFBundleIdentifier CFBundleShortVersionString CFBundleVersion; do V=$(/usr/libexec/PlistBuddy -c "Print :ApplicationProperties:$K" "$PL" 2>/dev/null); printf '@@NONCE:%s=%s\n' "$K" "$V"; done
+fi
+exit 0
+

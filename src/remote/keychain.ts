@@ -48,3 +48,13 @@ export function keychainSecretStore(name: string, value: string): string {
 export function keychainRedactionScript(variable: string): string {
   return `perl -0pe 's/\\Q\$ENV{${variable}}\\E/[redacted]/g'`;
 }
+
+/**
+ * Print `file` with every named Mac-side secret replaced by [redacted]. The file must be the argument of the FIRST
+ * perl in the pipeline: a perl without a file reads stdin, which for `zsh -s` scripts is the script itself.
+ */
+export function keychainRedactionPipeline(variables: string[], file = `"$output"`): string {
+  if (!variables.length) return `cat ${file}`;
+  const [first, ...rest] = variables;
+  return [`${keychainRedactionScript(first)} ${file}`, ...rest.map((variable) => keychainRedactionScript(variable))].join(" | ");
+}
