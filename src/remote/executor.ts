@@ -13,7 +13,7 @@ export interface RemoteReadiness { ok: boolean; target: string; items: RemoteRea
 
 const LIMIT = 12_000;
 
-function quote(value: string): string { return `'${value.replaceAll("'", `'"'"'`)}'`; }
+export function quote(value: string): string { return `'${value.replaceAll("'", `'"'"'`)}'`; }
 function sshArgs(host: RemoteBuildHost, remoteArgs: string[]): string[] {
   return ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ...(host.port ? ["-p", String(host.port)] : []), host.target, ...remoteArgs];
 }
@@ -31,11 +31,11 @@ function capture(executable: string, args: string[], input = "", timeoutMs = 30_
   });
 }
 
-async function sshScript(host: RemoteBuildHost, script: string, timeoutMs = 30_000, maxOutput = LIMIT): Promise<{ code: number; output: string }> {
+export async function sshScript(host: RemoteBuildHost, script: string, timeoutMs = 30_000, maxOutput = LIMIT): Promise<{ code: number; output: string }> {
   return capture("ssh", sshArgs(host, ["/bin/zsh", "-s"]), `export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"\n${script}`, timeoutMs, maxOutput);
 }
 
-function remotePaths(host: RemoteBuildHost, id: string): { root: string; job: string; source: string; cache: string } {
+export function remotePaths(host: RemoteBuildHost, id: string): { root: string; job: string; source: string; cache: string } {
   const root = `"$HOME"/${quote(host.root)}`;
   return { root, job: `${root}/jobs/${id}`, source: `${root}/jobs/${id}/source`, cache: `${root}/cache` };
 }
@@ -83,7 +83,7 @@ export async function saveRemoteKeychainSecret(host: RemoteBuildHost, name: stri
   if (result.code !== 0) throw new Error(`Could not save the Mac Build Keychain secret '${name}'. ${result.output.trim()}`.trim());
 }
 
-async function upload(root: string, host: RemoteBuildHost, remoteSource: string): Promise<void> {
+export async function upload(root: string, host: RemoteBuildHost, remoteSource: string): Promise<void> {
   const names = await git(root, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"]);
   if (!names) throw new Error("The worktree has no files to upload.");
   await new Promise<void>((resolve, reject) => {
@@ -103,7 +103,7 @@ async function upload(root: string, host: RemoteBuildHost, remoteSource: string)
   });
 }
 
-async function collectFiles(folder: string): Promise<string[]> {
+export async function collectFiles(folder: string): Promise<string[]> {
   const found: string[] = [];
   async function visit(current: string): Promise<void> {
     for (const entry of await readdir(current, { withFileTypes: true })) {
@@ -115,7 +115,7 @@ async function collectFiles(folder: string): Promise<string[]> {
   return found;
 }
 
-async function downloadAttachments(host: RemoteBuildHost, remoteFolder: string, localFolder: string): Promise<void> {
+export async function downloadAttachments(host: RemoteBuildHost, remoteFolder: string, localFolder: string): Promise<void> {
   await mkdir(localFolder, { recursive: true });
   await new Promise<void>((resolve) => {
     const remote = spawn("ssh", sshArgs(host, [`cd ${remoteFolder} 2>/dev/null && { count=0; total=0; find . -type f \\( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' \\) -size -10M -print0 | while IFS= read -r -d '' file; do size=$(stat -f %z "$file" 2>/dev/null || printf 0); [ $((total+size)) -gt 10485760 ] && continue; printf '%s\\0' "$file"; total=$((total+size)); count=$((count+1)); [ "$count" -ge 20 ] && break; done; } | tar -cf - --null -T -`]), { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });

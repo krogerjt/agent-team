@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { testRemoteBuildHost, type RemoteScriptRunner } from "./executor.js";
-import { buildKeychainShell, DEFAULT_BUILD_KEYCHAIN_PATH, keychainHealthScript, keychainRedactionScript, keychainSecretLookup } from "./keychain.js";
+import { buildKeychainShell, DEFAULT_BUILD_KEYCHAIN_PATH, keychainHealthScript, keychainRedactionScript, keychainSecretLookup, keychainSecretStore } from "./keychain.js";
 
 const host = { enabled: true, target: "builder@mac.local", root: ".agent-team-builder" };
 const healthyMac = "MACOS\t15.0\nXCODE\tXcode 16.0\nSIMULATORS\t1\nTAR\t/usr/bin/tar\nPOD\t/usr/local/bin/pod\nBUNDLE\t/usr/local/bin/bundle\nDISK\t20000000\n";
@@ -37,6 +37,14 @@ test("secret lookup is explicit and output redaction uses the Mac-side environme
   assert.match(lookup, /AGENT_TEAM_MAC_KEYCHAIN_PATH/);
   assert.doesNotMatch(lookup, /login\.keychain/);
   assert.match(keychainRedactionScript("API_TOKEN"), /ENV\{API_TOKEN\}/);
+});
+
+test("secret store puts the keychain path last, after -w with a value (BSD getopt stops at the first positional)", async () => {
+  const store = keychainSecretStore("asc-key-id", "it's-a-value");
+  assert.match(store, /add-generic-password -U -a 'asc-key-id' -s 'com\.openai\.agent-team\.remote-build' -w "\$V" "\$AGENT_TEAM_MAC_KEYCHAIN_PATH"/);
+  assert.doesNotMatch(store, /"\$AGENT_TEAM_MAC_KEYCHAIN_PATH" -w/);
+  const { spawnSync } = await import("node:child_process");
+  if (spawnSync("bash", ["-c", "true"]).status === 0) assert.equal(spawnSync("bash", ["-n"], { input: store }).status, 0);
 });
 
 test("XcodeGen readiness identifies a missing generator only when the project needs it", async () => {

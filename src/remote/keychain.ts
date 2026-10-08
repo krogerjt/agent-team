@@ -40,7 +40,9 @@ export function keychainSecretLookup(name: string): string {
 }
 
 export function keychainSecretStore(name: string, value: string): string {
-  return `printf '%s\\n' ${quote(value)} | /usr/bin/security add-generic-password -U -a ${quote(name)} -s 'com.openai.agent-team.remote-build' "\$AGENT_TEAM_MAC_KEYCHAIN_PATH" -w >/dev/null`;
+  // macOS `security` stops parsing options at the first positional argument, so the keychain path must come last
+  // and the password must be passed to -w (a trailing bare -w only prompts, and only when no keychain is named).
+  return `printf '%s\\n' ${quote(value)} | { V="$(cat)"; /usr/bin/security add-generic-password -U -a ${quote(name)} -s 'com.openai.agent-team.remote-build' -w "$V" "\$AGENT_TEAM_MAC_KEYCHAIN_PATH" >/dev/null; }`;
 }
 
 export function keychainRedactionScript(variable: string): string {
