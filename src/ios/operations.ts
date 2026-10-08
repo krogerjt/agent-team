@@ -34,14 +34,12 @@ export interface OperationRequest { operation: OperationName; dryRun?: boolean; 
 export async function captureRunContext(root: string): Promise<RunContext> {
   const commit = await git(root, ["rev-parse", "HEAD"]).catch(() => undefined);
   const status = await git(root, ["status", "--porcelain", "--untracked-files=all"]).catch(() => "");
+  // Identity is the content of every file that would be uploaded, so committing identical files keeps the same hash.
+  // release/ (store metadata) and docs/ (the public website) do not change what the app is.
   const hash = createHash("sha256");
-  hash.update(commit ?? "no-commit");
-  hash.update(await git(root, ["diff", "HEAD", "--no-ext-diff", "--", ".", ":(exclude)release"]).catch(() => ""));
-  for (const file of (await listProjectFiles(root).catch(() => [])).sort()) {
-    if (file.startsWith("release/")) continue; // release metadata does not change what the code is
-    const tracked = await git(root, ["ls-files", "--error-unmatch", "--", file]).then(() => true, () => false);
-    if (!tracked) hash.update(`${file}\0`).update(await readFile(path.join(root, file)).catch(() => Buffer.alloc(0)));
-  }
+  const files = (await listProjectFiles(root).catch(() => [] as string[])).filter((file) => !file.startsWith("release/") && !file.startsWith("docs/")).sort();
+  const contents = await Promise.all(files.map((file) => readFile(path.join(root, file)).catch(() => Buffer.alloc(0))));
+  files.forEach((file, index) => hash.update(file + "|" + contents[index].length + "|").update(contents[index]));
   return { root, commit, dirty: Boolean(status), treeHash: hash.digest("hex"), at: new Date().toISOString() };
 }
 

@@ -296,6 +296,24 @@ test("exact worktree context is recorded for every persisted run", async () => {
   } finally { await repo.cleanup(); }
 });
 
+test("code identity follows file contents: committing the same files or editing release/docs does not change it", async () => {
+  const repo = await iosRepo(healthyApp());
+  try {
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    const before = (await captureRunContext(repo.root)).treeHash;
+    await git(repo.root, ["add", "-A"]);
+    await git(repo.root, ["commit", "-qm", "commit identical files"]);
+    const afterCommit = await captureRunContext(repo.root);
+    assert.equal(afterCommit.treeHash, before, "a commit of identical content keeps the same identity");
+    assert.equal(afterCommit.dirty, false);
+    await mkdir(`${repo.root}/docs`, { recursive: true }); await mkdir(`${repo.root}/release`, { recursive: true });
+    await writeFile(`${repo.root}/docs/privacy.md`, "page"); await writeFile(`${repo.root}/release/metadata.json`, "{}");
+    assert.equal((await captureRunContext(repo.root)).treeHash, before, "website and store metadata are not code");
+    await writeFile(`${repo.root}/Acme/AcmeApp.swift`, "// changed\n");
+    assert.notEqual((await captureRunContext(repo.root)).treeHash, before, "a code change does change it");
+  } finally { await repo.cleanup(); }
+});
+
 test("every generated Mac script is syntactically valid shell", async () => {
   const { spawnSync } = await import("node:child_process");
   if (spawnSync("bash", ["-c", "true"]).status !== 0) return;

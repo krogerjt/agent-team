@@ -103,7 +103,7 @@ npm run ios -- preflight  --repo C:\path\to\ios-repo      # dry run of archive/e
 
 A build, test, archive or upload is reported as `status: "success"` only when the command exited 0 **and** its expected output was verified: a `BUILD SUCCEEDED` line plus an `.app`; an XCTest summary with tests run and none failed; an `.xcarchive` whose bundle ID, version and build match the project; a non-empty `.ipa`; Apple's success message. Readiness checks never count as success. If a command exits 0 but verification fails, the result is `failed` with `failureClass: "verification"`.
 
-Every operation records the exact worktree it used (commit, dirty flag and a tree hash that ignores `release/` metadata). An archive or export is only used if it was built from the current tree. Temporary Mac-side source copies and API-key files are removed after each operation, success or failure; only build caches and archives remain.
+Every operation records the exact worktree it used (commit, dirty flag and a content hash of the uploaded files that ignores `release/` and `docs/`). An archive or export is only used if it was built from the current tree. Temporary Mac-side source copies and API-key files are removed after each operation, success or failure; only build caches and archives remain.
 
 ### Mac Build Host setup
 
