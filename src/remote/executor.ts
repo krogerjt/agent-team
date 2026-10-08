@@ -97,6 +97,9 @@ export async function upload(root: string, host: RemoteBuildHost, remoteSource: 
     pack.stderr.on("data", (chunk: Buffer) => { error += chunk.toString(); });
     unpack.stderr.on("data", (chunk: Buffer) => { error += chunk.toString(); });
     pack.on("error", reject); unpack.on("error", reject);
+    // The SSH side can close mid-transfer (Mac asleep, overloaded, or the connection dropped); report it instead of crashing.
+    unpack.stdin.on("error", (streamError) => reject(new Error(`Remote upload failed: the connection to the Mac closed during transfer (${streamError.message}). ${error.slice(-500)}`.trim())));
+    pack.stdout.on("error", () => undefined);
     pack.on("close", (code) => { packCode = code; finish(); });
     unpack.on("close", (code) => { unpackCode = code; finish(); });
     pack.stdout.pipe(unpack.stdin); pack.stdin.end(names);
@@ -120,7 +123,14 @@ export async function downloadAttachments(host: RemoteBuildHost, remoteFolder: s
   await mkdir(localFolder, { recursive: true });
   await new Promise<void>((resolve) => {
     const remote = spawn("ssh", sshArgs(host, [`cd ${remoteFolder} 2>/dev/null && { count=0; total=0; find . -type f \\( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg'${options.includeManifest ? " -o -iname 'manifest.json'" : ""} \\) -size -10M -print0 | while IFS= read -r -d '' file; do size=$(stat -f %z "$file" 2>/dev/null || printf 0); [ $((total+size)) -gt ${maxBytes} ] && continue; printf '%s\\0' "$file"; total=$((total+size)); count=$((count+1)); [ "$count" -ge 20 ] && break; done; } | tar -cf - --null -T -`]), { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-    const local = spawn("tar", ["-xf", "-", "-C", localFolder], { windowsHide: true, stdio: ["pipe", "ignore", "ignore"] });
+    const local = spawn("tar", ["-xf", "-"], { cwd: localFolder, windowsHide: true, stdio: ["pipe", "ignore", "pipe"] }); // cwd instead of -C: GNU tar reads "C:\..." as a remote host
+    // tar can exit early (bad entry, disk error); a closed pipe must not crash the host, and tar's reason is worth keeping.
+    let tarError = "";
+    local.stderr.on("data", (chunk: Buffer) => { tarError += chunk.toString(); });
+    local.stdin.on("error", () => undefined);
+    remote.stdout.on("error", () => undefined);
+    // If tar stops reading, ssh would block forever on a full pipe: stop it so the run can finish and clean up.
+    local.on("close", () => { if (tarError.trim()) console.error(`Attachment download: tar reported: ${tarError.trim().slice(0, 500)}`); remote.kill(); });
     remote.stdout.pipe(local.stdin);
     let remoteDone = false, localDone = false;
     const done = () => { if (remoteDone && localDone) resolve(); };
