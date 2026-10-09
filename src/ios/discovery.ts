@@ -84,6 +84,7 @@ function targetFromSettings(name: string, type: IosTarget["productType"], settin
   const bundleId = resolveSetting(merged.PRODUCT_BUNDLE_IDENTIFIER, { ...merged, PRODUCT_NAME: merged.PRODUCT_NAME === "$(TARGET_NAME)" || !merged.PRODUCT_NAME ? name : merged.PRODUCT_NAME });
   return {
     name, productType: type, bundleId,
+    platform: ({ iphoneos: "iOS", iphonesimulator: "iOS", macosx: "macOS", appletvos: "tvOS", watchos: "watchOS", xros: "visionOS" } as Record<string, string>)[(merged.SDKROOT ?? "").toLowerCase()],
     marketingVersion: merged.MARKETING_VERSION, buildNumber: merged.CURRENT_PROJECT_VERSION,
     deploymentTarget: merged.IPHONEOS_DEPLOYMENT_TARGET, infoPlist: merged.INFOPLIST_FILE,
     entitlements: merged.CODE_SIGN_ENTITLEMENTS, deviceFamily: merged.TARGETED_DEVICE_FAMILY, codeSignStyle: merged.CODE_SIGN_STYLE, developmentTeam: merged.DEVELOPMENT_TEAM, versionSource: source,
@@ -118,6 +119,7 @@ function xcodeGenTargets(spec: XcodeGenSpec): IosTarget[] {
     const bundleVersion = typeof props.CFBundleVersion === "string" || typeof props.CFBundleVersion === "number" ? String(props.CFBundleVersion) : undefined;
     return {
       ...built,
+      platform: target.platform ?? built.platform,
       marketingVersion: resolveSetting(short, { ...project, ...settings }) ?? built.marketingVersion,
       buildNumber: resolveSetting(bundleVersion, { ...project, ...settings }) ?? built.buildNumber,
       infoPlist: target.info?.path ?? built.infoPlist,

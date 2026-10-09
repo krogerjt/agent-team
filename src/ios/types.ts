@@ -16,6 +16,8 @@ export interface Finding {
 export interface IosTarget {
   name: string;
   productType: "application" | "unit-test" | "ui-test" | "other";
+  /** iOS, macOS, tvOS, watchOS or visionOS when the project says so. */
+  platform?: string;
   bundleId?: string;
   marketingVersion?: string;
   buildNumber?: string;

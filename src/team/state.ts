@@ -22,6 +22,13 @@ export interface TaskState {
   error?: string;
 }
 
+export interface ReleaseStageState {
+  /** ready: everything automatable is verified. needs-input/blocked: see the report. skipped/failed: the stage could not run. */
+  status: "ready" | "needs-input" | "blocked" | "skipped" | "failed";
+  report: string;
+  at: string;
+}
+
 export interface TeamRunState {
   id: string;
   repo: string;
@@ -38,6 +45,8 @@ export interface TeamRunState {
   integrationChecks?: CheckResult[];
   integrationHistory?: Array<{ staging: Worktree; baseCommit: string }>;
   needsPreviewReview?: boolean;
+  /** Hollis's automatic release-readiness report, for iOS apps when the goal is about releasing. */
+  release?: ReleaseStageState;
   preview?: PreviewInfo & { approvedKeys?: string[]; piperAttempts?: number; visualFixAttempted?: boolean };
   libraryPath: string;
   runDir: string;

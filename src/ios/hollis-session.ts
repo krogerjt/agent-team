@@ -26,6 +26,8 @@ export interface HollisSessionOptions {
   /** Where to start: the user's checkout (read-only), or an existing staging/task worktree (writable). */
   root: string;
   writable: boolean;
+  /** "readiness" is the host's automatic hand-off: verification and reporting only. No editing, and signing/upload operations are refused unless they are dry runs. */
+  mode?: "full" | "readiness";
   runDir?: string;
   web?: WebDeps;
   run?: RemoteScriptRunner;
@@ -42,15 +44,19 @@ export interface HollisSession {
 }
 
 const GATED = new Set(["apply_patch", "create_png"]);
+const READINESS_HIDDEN = new Set(["ios_open_release_workspace", "ios_commit_release_changes", "apply_patch", "create_png"]);
+const RELEASE_ACTIONS = new Set(["build-release", "install-device", "archive", "export", "upload"]);
 
 export function createHollisSession(options: HollisSessionOptions): HollisSession {
   let root = options.root;
-  let writable = options.writable;
+  const readiness = options.mode === "readiness";
+  let writable = readiness ? false : options.writable;
   let workspace = new WorkspaceTools(root, writable ? "lead" : "researcher");
   const web = createWebExecutor(options.web);
   // Stable tool list for the model: patch tools are always listed, and refuse until a writable workspace exists.
   const files = new WorkspaceTools(root, "lead").definitions.filter((definition) => definition.name !== "generate_png");
-  const definitions = [...iosTools(), workspaceTool, commitTool, ...files, ...webTools];
+  const everything = [...iosTools(), workspaceTool, commitTool, ...files, ...webTools];
+  const definitions = readiness ? everything.filter((definition) => !READINESS_HIDDEN.has(definition.name)) : everything;
   const context = (): IosToolContext => ({ root, repo: options.repo, writable, runDir: options.runDir, run: options.run });
 
   async function openWorkspace(): Promise<ToolResult> {
@@ -79,6 +85,10 @@ export function createHollisSession(options: HollisSessionOptions): HollisSessio
     definitions, root: () => root, writable: () => writable,
     async execute(name, args) {
       if (isWebTool(name)) return web(name, args);
+      if (readiness) {
+        if (READINESS_HIDDEN.has(name)) return { content: "Not available in the automated release-readiness stage. Editing and the release workspace are for a separate conversation with Hollis.", isError: true };
+        if (name === "ios_run_operation" && RELEASE_ACTIONS.has(String(args.operation)) && args.dryRun !== true) return { content: `${String(args.operation)} is not available in the automated release-readiness stage: it only verifies and reports. Use dryRun=true to preview it. Shipping happens afterwards, in a chat with Hollis, after you review and merge.`, isError: true };
+      }
       if (name === "ios_open_release_workspace") return openWorkspace();
       if (name === "ios_commit_release_changes") return commit(args);
       if (isIosTool(name)) return executeIosTool(name, args, context());

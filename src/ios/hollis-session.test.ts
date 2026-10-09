@@ -92,6 +92,29 @@ test("a session started in an existing worktree is writable, and web and playboo
   } finally { await repo.cleanup(); }
 });
 
+test("readiness mode (the host's automatic hand-off) cannot edit, open a workspace, or run signing and upload operations", async () => {
+  const repo = await committedApp();
+  try {
+    const session = createHollisSession({ repo: repo.root, root: repo.root, writable: true, mode: "readiness" });
+    const names = session.definitions.map((definition) => definition.name);
+    for (const hidden of ["apply_patch", "create_png", "ios_open_release_workspace", "ios_commit_release_changes"]) assert.ok(!names.includes(hidden), hidden);
+    for (const kept of ["ios_discover_project", "ios_check_readiness", "ios_release_audit", "ios_release_preflight", "ios_recent_runs", "ios_playbook", "web_search", "read_file"]) assert.ok(names.includes(kept), kept);
+    assert.equal(session.writable(), false, "even if the caller asked for a writable root");
+    for (const hidden of ["apply_patch", "ios_open_release_workspace", "ios_commit_release_changes"]) {
+      const refused = await session.execute(hidden, { path: "x", oldText: "", newText: "y", message: "m" });
+      assert.equal(refused?.isError, true, hidden); assert.match(refused!.content, /readiness stage/);
+    }
+    for (const operation of ["archive", "export", "upload", "build-release", "install-device"]) {
+      const refused = await session.execute("ios_run_operation", { operation });
+      assert.equal(refused?.isError, true, operation); assert.match(refused!.content, /readiness stage/); assert.match(refused!.content, /dryRun=true/);
+    }
+    const preview = await session.execute("ios_run_operation", { operation: "archive", dryRun: true });
+    assert.doesNotMatch(preview!.content, /readiness stage/, "a dry run is allowed through to the normal checks");
+    const simulator = await session.execute("ios_run_operation", { operation: "build-simulator", dryRun: true });
+    assert.doesNotMatch(simulator!.content, /readiness stage/);
+  } finally { await repo.cleanup(); }
+});
+
 test("the playbook is complete, specific, and contains no real identifiers or secrets", () => {
   const ids = PLAYBOOK.map((topic) => topic.id);
   assert.deepEqual(ids, ["overview", "mac-setup", "credentials", "signing-and-export", "app-fixes", "screenshots", "app-store-connect", "compliance-and-legal", "publishing-pages", "troubleshooting", "next-release"]);

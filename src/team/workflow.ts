@@ -5,7 +5,7 @@ import { createBranchWorktree, diff, git, resolveCleanRepo } from "../coding/git
 import { WorkspaceTools } from "../coding/workspace-tools.js";
 import { roster, type PersonaId, type WorkerId } from "../personas/roster.js";
 import { orderedTasks, parsePlan, type TeamTask } from "./plan.js";
-import { appendLibrary, createRunState, loadState, logEvent, readLibrary, repoHome, saveState, type TaskState, type TeamRunState } from "./state.js";
+import { appendLibrary, createRunState, loadState, logEvent, readLibrary, repoHome, saveState, type ReleaseStageState, type TaskState, type TeamRunState } from "./state.js";
 import { appendChat, configuredProvider, effectiveModel, personaContext, readPersona } from "./persona-store.js";
 import { readToolLoopDiagnostics, trackedGenerate, trackedGenerateWithTools } from "./telemetry.js";
 import { appendTimeline, ensureTimeline, executeMemoryTool, memoryTools } from "./timeline.js";
@@ -16,6 +16,7 @@ import { livePreview, startPreview, stopPreview, PreviewFailure, PreviewPause, P
 import { inspectPreview, runBrowserSteps, screenshotData, type BrowserStep } from "../preview/browser.js";
 import { buildEnvironmentTools, executeBuildEnvironmentTool } from "./environment-tools.js";
 import { createHollisSession } from "../ios/hollis-session.js";
+import { shouldRunReleaseStage } from "../ios/release-trigger.js";
 import { maxParallelTasks, toolLoopLimits } from "../config.js";
 import { serialize } from "./serial.js";
 
@@ -78,14 +79,14 @@ async function recordRunEvent(
 
 async function askWithTools(
   state: TeamRunState, persona: PersonaId, provider: ToolCapableProvider,
-  prompt: string, tools: WorkspaceTools, journalWork = true, taskId?: string,
+  prompt: string, tools: WorkspaceTools, journalWork = true, taskId?: string, hollisMode?: "full" | "readiness",
 ): Promise<string> {
   const personal = await personaContext(state.repo, persona);
   const writable = tools.definitions.some((tool) => tool.name === "apply_patch");
   const activeTitle = state.plan?.tasks.find((task) => taskId ? task.id === taskId : state.tasks.some((item) => item.id === task.id && (item.status === "doing" || item.status === "review")))?.title ?? state.goal;
   if (journalWork) await recordRunEvent(state, persona, "started", prompt.slice(0, 300), { taskId, summary: `${roster[persona].name} started ${activeTitle}` });
   else await logEvent(state, persona, "started", prompt.slice(0, 300));
-  const hollis = persona === "hollis" ? createHollisSession({ repo: state.repo, root: tools.root, writable: writable || tools.root !== state.repo, runDir: state.runDir }) : undefined;
+  const hollis = persona === "hollis" ? createHollisSession({ repo: state.repo, root: tools.root, writable: writable || tools.root !== state.repo, runDir: state.runDir, mode: hollisMode }) : undefined;
   const response = await generateToolsFor(state, persona, provider, {
     systemPrompt: `${roster[persona].systemPrompt}\n${personal}`,
     userPrompt: prompt,
@@ -413,6 +414,41 @@ async function visualFix(state: TeamRunState, providers: TeamProviders): Promise
   return true;
 }
 
+export function formatReleaseSection(release: ReleaseStageState): string {
+  const label = { ready: "ready", "needs-input": "needs your input", blocked: "blocked", skipped: "skipped", failed: "could not run" }[release.status];
+  return `**Release readiness (Hollis): ${label}**\n${release.report.trim()}`;
+}
+
+/**
+ * Host-triggered stage, like Piper's: when the repository is an iOS app and the goal is about releasing it, hand the
+ * finished staging worktree to Hollis for release readiness. It only verifies and reports. Editing, archive, export,
+ * upload and device installs are not available to him here (enforced in the session, not just the prompt): the run's
+ * code has not been reviewed or merged yet, so shipping is a separate conversation with Hollis afterwards.
+ */
+export async function runReleaseStage(state: TeamRunState, providers: TeamProviders): Promise<void> {
+  if (state.release || !state.staging) return;
+  if (!await shouldRunReleaseStage(state.goal, state.staging.path)) return;
+  const at = () => new Date().toISOString();
+  const provider = providers.hollis;
+  if (!provider) {
+    state.release = { status: "skipped", report: "No model provider is configured for Hollis (set HOLLIS_PROVIDER and HOLLIS_MODEL, or the lead settings).", at: at() };
+    await saveState(state);
+    return;
+  }
+  await recordRunEvent(state, "hollis", "release-stage", "Starting release-readiness verification", { summary: "Hollis started release-readiness verification" });
+  try {
+    const text = await askWithTools(state, "hollis", requireToolProvider(provider),
+      `Goal: ${state.goal}\nThis is the host's automatic release-readiness stage for the finished work in this worktree. You may only verify and report: ios_discover_project, ios_check_readiness, ios_run_operation for generate-project, build-simulator and test-simulator, ios_release_audit, and ios_release_preflight (dry run). Editing, the release workspace, archive, export, upload and device installs are unavailable here (dry runs excepted); do not try to work around that, and never ask for secrets. Read ios_playbook (overview, signing-and-export) first, and use ios_recent_runs, ios_mac_maintenance and web_search if something fails.\nBegin your reply with exactly one of: RELEASE_READY: (everything automatable is verified; only user-only steps remain), RELEASE_NEEDS_INPUT: (verified so far, but the user must supply or decide something), or RELEASE_BLOCKED: (a verification failed or the Mac or project is not usable). Then give a concise report: what was verified with its evidence, what failed, was pending or is blocked with the exact fix for each, and the next steps for the user (review and merge, then chat with Hollis to archive, export and upload, plus App Store Connect entries, which only the user can do). Do not claim anything a tool did not verify.`,
+      new WorkspaceTools(state.staging.path, "researcher"), true, undefined, "readiness");
+    const status = /^RELEASE_READY:/i.test(text.trim()) ? "ready" : /^RELEASE_BLOCKED:/i.test(text.trim()) ? "blocked" : "needs-input";
+    state.release = { status, report: text.trim().replace(/^RELEASE_(?:READY|NEEDS_INPUT|BLOCKED):\s*/i, ""), at: at() };
+  } catch (error) {
+    state.release = { status: "failed", report: `Hollis could not complete release readiness: ${error instanceof Error ? error.message : String(error)}`, at: at() };
+  }
+  await recordRunEvent(state, "hollis", "release-report", `${state.release.status}: ${state.release.report.slice(0, 600)}`, { summary: `Release readiness: ${state.release.status}` });
+  await saveState(state);
+}
+
 async function finishRun(state: TeamRunState, providers: TeamProviders, library: string): Promise<TeamRunState> {
   if (await isWebProject(state.staging!.path) && state.preview?.status !== "healthy") {
     state.status = "doing"; await saveState(state);
@@ -447,6 +483,7 @@ async function finishRun(state: TeamRunState, providers: TeamProviders, library:
     await saveState(state);
     return state;
   }
+  await runReleaseStage(state, providers);
   {
     const taskSummary = state.tasks.map((item) => `${item.id}: ${item.status}; checks: ${item.checks?.map((check) => `${check.name} ${check.status}`).join(", ")}; review: ${item.review ?? "none"}; QA: ${item.qa ?? "none"}`).join("\n") + (state.integrationChecks ? `\nThis run was updated against newer repository code. Task notes above describe the original build. Checks on the combined code: ${JSON.stringify(state.integrationChecks)}` : "");
     const fullDiff = await git(state.staging!.path, ["diff", "--no-ext-diff", `${state.baseCommit}..HEAD`, "--", "."]);
@@ -465,6 +502,7 @@ ${finalDiff}`,
       systemPrompt: `${roster.tove.systemPrompt}\n${await personaContext(state.repo, "tove")}`,
       userPrompt: `Write concise Markdown memory for future runs. Use the QA findings and final diff below as evidence. Record verified repository conventions, decisions, and remaining uncertainty only. Goal: ${state.goal}\nPlan: ${JSON.stringify(state.plan)}\nTasks:\n${taskSummary}\nFinal diff:\n${finalDiff.slice(0, 24_000)}\nHuman decisions: ${JSON.stringify(state.decisions ?? [])}\nExisting library:\n${library}`,
     })).text;
+    if (state.release && state.release.status !== "skipped") state.summary = `${state.summary}\n\n${formatReleaseSection(state.release)}`;
     state.status = "awaiting-review";
     state.needsPreviewReview = false;
     await logEvent(state, "host", "awaiting-review", state.staging!.path);
