@@ -89,11 +89,13 @@ export function compareVersions(left: string, right: string): number {
 
 export const RELEASE_DIR = "release";
 
-export interface ScreenshotClass { id: string; label: string; folder: string; required: "always" | "if-ipad"; accepted: Array<{ width: number; height: number }>; min: number; max: number }
+export interface ScreenshotClass { id: string; label: string; folder: string; required: "always" | "if-ipad" | "optional"; accepted: Array<{ width: number; height: number }>; min: number; max: number }
 
 /** Sizes follow Apple's published App Store Connect guidance when written; always confirm in App Store Connect before submitting. */
 export const SCREENSHOT_CLASSES: ScreenshotClass[] = [
   { id: "iphone-6.9", label: 'iPhone 6.9" display', folder: "iphone-6.9", required: "always", min: 1, max: 10, accepted: [{ width: 1320, height: 2868 }, { width: 1290, height: 2796 }, { width: 1260, height: 2736 }, { width: 2868, height: 1320 }, { width: 2796, height: 1290 }, { width: 2736, height: 1260 }] },
+  // The 6.3-inch class (iPhone 17 Pro, 16 Pro, 15 Pro and similar, with Dynamic Island). App Store Connect can scale the 6.9-inch set, but may ask for this size explicitly.
+  { id: "iphone-6.3", label: 'iPhone 6.3" display', folder: "iphone-6.3", required: "optional", min: 1, max: 10, accepted: [{ width: 1206, height: 2622 }, { width: 1179, height: 2556 }, { width: 2622, height: 1206 }, { width: 2556, height: 1179 }] },
   { id: "ipad-13", label: 'iPad 13" display', folder: "ipad-13", required: "if-ipad", min: 1, max: 10, accepted: [{ width: 2064, height: 2752 }, { width: 2048, height: 2732 }, { width: 2752, height: 2064 }, { width: 2732, height: 2048 }] },
 ];
 
@@ -105,7 +107,7 @@ export function supportsIpad(discovery: IosDiscovery): boolean | undefined {
 export function screenshotRequirements(discovery: IosDiscovery): { classes: Array<ScreenshotClass & { needed: boolean | "unknown" }>; guidance: string[] } {
   const ipad = supportsIpad(discovery);
   return {
-    classes: SCREENSHOT_CLASSES.map((entry) => ({ ...entry, needed: entry.required === "always" ? true : ipad ?? "unknown" })),
+    classes: SCREENSHOT_CLASSES.map((entry) => ({ ...entry, needed: entry.required === "always" ? true : entry.required === "optional" ? false : ipad ?? "unknown" })),
     guidance: [
       `Put opaque PNG files under ${RELEASE_DIR}/screenshots/<folder>/ using the folder names above. They must have no alpha channel and match an accepted pixel size exactly.`,
       "iPhone 6.9\": boot an iPhone 17 Pro Max (or the largest available iPhone) simulator, run the app, and capture: xcrun simctl io booted screenshot iphone-1.png.",

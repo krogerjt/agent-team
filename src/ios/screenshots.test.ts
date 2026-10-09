@@ -36,20 +36,24 @@ test("screenshots are collected as opaque, correctly sized PNGs in the right cla
       await fakeAttachments(repo.root, [
         { file: "A.png", human: "02-cards_0_6F2C1A3B-1111-2222-3333-444455556666.png", width: 1320, height: 2868, alpha: true },
         { file: "B.png", human: "01-decks_0_6F2C1A3B-1111-2222-3333-444455556667.png", width: 1320, height: 2868, alpha: false },
-        { file: "C.png", human: "03-small_0_6F2C1A3B-1111-2222-3333-444455556668.png", width: 1206, height: 2622, alpha: false },
+        { file: "C.png", human: "03-small_0_6F2C1A3B-1111-2222-3333-444455556668.png", width: 1000, height: 2000, alpha: false },
+        { file: "D.png", human: "04-medium_0_6F2C1A3B-1111-2222-3333-444455556669.png", width: 1206, height: 2622, alpha: true },
       ]);
       const dry = await collectScreenshots(repo.root, repo.root, { dryRun: true });
-      assert.equal(dry.collected.filter((c) => c.target).length, 2);
+      assert.equal(dry.collected.filter((c) => c.target).length, 3);
       await assert.rejects(() => readFile(path.join(repo.root, "release/screenshots/iphone-6.9/01-decks.png")));
       const result = await collectScreenshots(repo.root, repo.root, { dryRun: false });
-      assert.deepEqual(result.collected.map((c) => c.name), ["01-decks", "02-cards", "03-small"]);
+      assert.deepEqual(result.collected.map((c) => c.name), ["01-decks", "02-cards", "03-small", "04-medium"]);
       const skipped = result.collected.find((c) => c.name === "03-small")!;
-      assert.match(skipped.skipped!, /1206×2622 is not an accepted/);
+      assert.match(skipped.skipped!, /1000×2000 is not an accepted/);
+      const medium = result.collected.find((c) => c.name === "04-medium")!;
+      assert.equal(medium.screenshotClass, "iphone-6.3");
+      assert.deepEqual(pngInfo(await readFile(path.join(repo.root, "release/screenshots/iphone-6.3/04-medium.png"))), { width: 1206, height: 2622, alpha: false });
       for (const name of ["01-decks", "02-cards"]) {
         const info = pngInfo(await readFile(path.join(repo.root, `release/screenshots/iphone-6.9/${name}.png`)));
         assert.deepEqual(info, { width: 1320, height: 2868, alpha: false });
       }
-      assert.match(result.message, /Wrote 2 screenshot/);
+      assert.match(result.message, /Wrote 3 screenshot/);
     });
   } finally { await repo.cleanup(); }
 });
