@@ -15,7 +15,7 @@ import { extractCookbook, readCookbook, saveCookbook, type Cookbook } from "../p
 import { livePreview, startPreview, stopPreview, PreviewFailure, PreviewPause, PreviewStopped, type PreviewInfo } from "../preview/runtime.js";
 import { inspectPreview, runBrowserSteps, screenshotData, type BrowserStep } from "../preview/browser.js";
 import { buildEnvironmentTools, executeBuildEnvironmentTool } from "./environment-tools.js";
-import { executeIosTool, iosTools, isIosTool } from "../ios/tools.js";
+import { createHollisSession } from "../ios/hollis-session.js";
 import { maxParallelTasks, toolLoopLimits } from "../config.js";
 import { serialize } from "./serial.js";
 
@@ -23,6 +23,12 @@ import { serialize } from "./serial.js";
 export type TeamProviders = Record<Exclude<PersonaId, "hollis">, ModelProvider> & { hollis?: ModelProvider };
 const stopPreviewTool = { name: "stop_preview", description: "Stop the local preview for this run when it is no longer needed.", parameters: { type: "object", properties: {}, required: [], additionalProperties: false } };
 const startPreviewTool = { name: "start_preview", description: "Start or inspect the staged web preview. The host follows Piper's cookbook and waits for it to become healthy.", parameters: { type: "object", properties: {}, required: [], additionalProperties: false } };
+
+/** A release is many slow Mac operations in a row, so Hollis gets three times the usual loop budget. */
+function hollisLimits(): { maxToolCalls: number; maxRounds: number } {
+  const limits = toolLoopLimits();
+  return { maxToolCalls: limits.maxToolCalls * 3, maxRounds: limits.maxRounds * 3 };
+}
 
 async function generateFor(state: TeamRunState, persona: PersonaId, provider: ModelProvider, request: Parameters<ModelProvider["generate"]>[0]) {
   return trackedGenerate(state.repo, persona, await effectiveModel(state.repo, persona), provider, request);
@@ -79,10 +85,11 @@ async function askWithTools(
   const activeTitle = state.plan?.tasks.find((task) => taskId ? task.id === taskId : state.tasks.some((item) => item.id === task.id && (item.status === "doing" || item.status === "review")))?.title ?? state.goal;
   if (journalWork) await recordRunEvent(state, persona, "started", prompt.slice(0, 300), { taskId, summary: `${roster[persona].name} started ${activeTitle}` });
   else await logEvent(state, persona, "started", prompt.slice(0, 300));
+  const hollis = persona === "hollis" ? createHollisSession({ repo: state.repo, root: tools.root, writable: writable || tools.root !== state.repo, runDir: state.runDir }) : undefined;
   const response = await generateToolsFor(state, persona, provider, {
     systemPrompt: `${roster[persona].systemPrompt}\n${personal}`,
     userPrompt: prompt,
-    tools: [...tools.definitions, ...memoryTools, ...buildEnvironmentTools(writable), ...(persona === "hollis" ? iosTools() : []), stopPreviewTool, ...(state.tasks.length && state.tasks.every((task) => task.status === "done") && persona !== "piper" ? [startPreviewTool] : [])],
+    tools: hollis ? [...hollis.definitions, ...memoryTools] : [...tools.definitions, ...memoryTools, ...buildEnvironmentTools(writable), stopPreviewTool, ...(state.tasks.length && state.tasks.every((task) => task.status === "done") && persona !== "piper" ? [startPreviewTool] : [])],
     execute: async (name, args) => {
       if (name === "stop_preview") { await stopPreview(state.id); if (state.preview) { state.preview.status = "stopped"; state.preview.url = undefined; await saveState(state); } return { content: "Preview stopped." }; }
       if (name === "start_preview") {
@@ -100,11 +107,11 @@ async function askWithTools(
         files: typeof args.path === "string" ? [args.path] : [],
       });
       else await logEvent(state, persona, "tool", `${name} ${JSON.stringify(args).slice(0, 300)}`);
-      if (persona === "hollis" && isIosTool(name)) return executeIosTool(name, args, { root: tools.root, repo: state.repo, writable: writable || tools.root !== state.repo, runDir: state.runDir });
+      if (hollis) { const result = await hollis.execute(name, args); if (result) return result; }
       if (name === "inspect_build_environment" || name === "run_checks") return executeBuildEnvironmentTool(name, tools.root, state.repo, writable, { runDir: state.runDir, taskId: taskId ?? state.tasks.find((task) => task.status === "doing")?.id });
       return tools.execute(name, args);
     },
-    ...toolLoopLimits(),
+    ...(hollis ? hollisLimits() : toolLoopLimits()),
   }, journalWork);
   if (journalWork) await recordRunEvent(state, persona, "responded", `tool calls: ${response.toolCalls}; ${response.text.slice(0, 1_500)}`, { taskId, summary: `${roster[persona].name} returned findings for ${activeTitle}; acceptance checks are separate` });
   else await logEvent(state, persona, "responded", `tool calls: ${response.toolCalls}; ${response.text.slice(0, 300)}`);
@@ -549,7 +556,7 @@ export async function messageTeamPersona(runDir: string, persona: PersonaId, mes
   const history = (await readPersona(state.repo, persona)).chat.slice(-10).map((item) => `${item.role}: ${item.text}`).join("\n");
   await appendChat(state.repo, persona, { at: new Date().toISOString(), role: "user", text: message, runId: state.id });
   const reply = await askWithTools(state, persona, requireToolProvider(injectedProvider ?? await configuredProvider(state.repo, persona)),
-    `Recent conversation:\n${history || "(none)"}\nUser message to ${roster[persona].name}: ${message}\nGoal: ${state.goal}\nCurrent plan: ${JSON.stringify(state.plan ?? null)}\nTask wall: ${JSON.stringify(state.tasks.map((task) => ({ id: task.id, status: task.status })))}\nShared library:\n${library || "(empty)"}\nRespond to the user. You may inspect files, but this direct message cannot edit code.`,
+    `Recent conversation:\n${history || "(none)"}\nUser message to ${roster[persona].name}: ${message}\nGoal: ${state.goal}\nCurrent plan: ${JSON.stringify(state.plan ?? null)}\nTask wall: ${JSON.stringify(state.tasks.map((task) => ({ id: task.id, status: task.status })))}\nShared library:\n${library || "(empty)"}\nRespond to the user. ${persona === "hollis" ? "You may edit files only inside a release workspace that you open yourself with ios_open_release_workspace; never in the user's own checkout." : "You may inspect files, but this direct message cannot edit code."}`,
     new WorkspaceTools(workspace, "researcher"), false);
   await appendChat(state.repo, persona, { at: new Date().toISOString(), role: "assistant", text: reply, runId: state.id });
   await appendTimeline(state.repo, persona, { at: new Date().toISOString(), event: "conversation", summary: `Discussed: ${message}`, detail: `User: ${message.slice(0, 1_000)}\nAgent: ${reply.slice(0, 900)}`, feature: state.goal, files: [], runId: state.id, source: "chat" });
@@ -565,18 +572,19 @@ export async function chatTeamPersona(repo: string, persona: PersonaId, message:
   const provider = requireToolProvider(await configuredProvider(repo, persona));
   const personal = await personaContext(repo, persona);
   const tools = new WorkspaceTools(repo, "researcher");
+  const hollis = persona === "hollis" ? createHollisSession({ repo, root: repo, writable: false }) : undefined;
   const response = await trackedGenerateWithTools(repo, persona, await effectiveModel(repo, persona), provider, {
     systemPrompt: `${roster[persona].systemPrompt}\n${personal}`,
-    userPrompt: `Recent conversation:\n${history || "(none)"}\nShared repository library:\n${library || "(empty)"}\nUser: ${message}\nReply as ${roster[persona].name}. You may inspect the repository, but do not edit files.`,
-    tools: [...tools.definitions, ...memoryTools, ...buildEnvironmentTools(false), ...(persona === "hollis" ? iosTools() : [])],
+    userPrompt: `Recent conversation:\n${history || "(none)"}\nShared repository library:\n${library || "(empty)"}\nUser: ${message}\nReply as ${roster[persona].name}. ${persona === "hollis" ? "You may inspect the repository; open a release workspace (ios_open_release_workspace) before any edit." : "You may inspect the repository, but do not edit files."}`,
+    tools: hollis ? [...hollis.definitions, ...memoryTools] : [...tools.definitions, ...memoryTools, ...buildEnvironmentTools(false)],
     execute: (name, args) => name === "search_memory" || name === "get_memory_entry"
       ? executeMemoryTool(repo, persona, name, args)
-      : persona === "hollis" && isIosTool(name)
-        ? executeIosTool(name, args, { root: repo, repo, writable: false })
+      : hollis
+        ? hollis.execute(name, args).then((result) => result ?? tools.execute(name, args))
       : name === "inspect_build_environment"
         ? executeBuildEnvironmentTool(name, repo, repo, false)
         : tools.execute(name, args),
-    ...toolLoopLimits(),
+    ...(hollis ? hollisLimits() : toolLoopLimits()),
   });
   const reply = response.text.trim();
   if (!reply) throw new Error(`${roster[persona].name} returned an empty response.`);

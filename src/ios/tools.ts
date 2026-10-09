@@ -9,6 +9,12 @@ import { inspectIosReadiness } from "./readiness.js";
 import { captureRunContext, runIosOperation, type OperationDeps } from "./operations.js";
 import { bumpVersion, generateReleaseTemplates, screenshotRequirements, submissionChecklist, validateReleaseFiles } from "./prepare.js";
 import { collectScreenshots } from "./screenshots.js";
+import { playbookIndex, playbookTopic } from "./playbook.js";
+import { MAINTENANCE_ACTIONS, runMaintenance, type MaintenanceAction } from "./maintenance.js";
+import { readdir, readFile as readTextFile } from "node:fs/promises";
+import path from "node:path";
+import { runsDir } from "./store.js";
+import { redactSecrets } from "./redact.js";
 import { buildProgress, resumeAfterBlocker, satisfiedBlockers } from "./session.js";
 import { readIosState, recordStep, type IosReleaseState } from "./store.js";
 import type { Finding, IosDiscovery, OperationName, StepId } from "./types.js";
@@ -20,6 +26,9 @@ function schema(properties: Record<string, unknown>, required: string[] = []): R
 const OPERATIONS: OperationName[] = ["generate-project", "build-simulator", "test-simulator", "build-release", "install-device", "archive", "export", "upload"];
 
 const readTools: ToolDefinition[] = [
+  { name: "ios_recent_runs", description: "List recent iOS operations with status, summary and failure class; pass id to read the (redacted) end of that run's output log. Use this to diagnose a failed or odd result instead of guessing.", parameters: schema({ id: { type: "string", description: "A run id from the list." } }) },
+  { name: "ios_mac_maintenance", description: "Fixed upkeep for the Mac Build Host, limited to this tool's own folder and processes: diagnose (load, disk, Xcode, leftover jobs, running builds), clear-stale-jobs (job folders older than a day), clear-build-cache, stop-stray-builds (only builds using this tool's cache). Never touches the user's Xcode or projects. Use when builds fail with 'database is locked', the Mac is slow, or space is low.", parameters: schema({ action: { type: "string", enum: ["diagnose", "clear-stale-jobs", "clear-build-cache", "stop-stray-builds"] } }, ["action"]) },
+  { name: "ios_playbook", description: "Read the iOS release runbook learned from a real submission: who does what, Mac and credential setup, signing/export/upload, app bugs seen on iOS 26, screenshots, App Store Connect fields, compliance and legal guidance, publishing pages, a symptom-to-fix troubleshooting table, and the next-release checklist. Call with no topic for the index. Read the relevant topic before a step and before diagnosing an error.", parameters: schema({ topic: { type: "string", description: "overview, mac-setup, credentials, signing-and-export, app-fixes, screenshots, app-store-connect, compliance-and-legal, publishing-pages, troubleshooting, next-release" } }) },
   { name: "ios_discover_project", description: "Inspect the iOS repository from files only: Xcode project/workspace, XcodeGen spec, app target, schemes, bundle ID, version, build number, deployment target, icons, test targets, signing and release configuration, privacy/support/App Store metadata files. Separates facts, missing items, warnings and blockers. Read-only.", parameters: schema({}) },
   { name: "ios_check_readiness", description: "Check the connected Mac for iOS releasing: macOS, Xcode 26+, command-line tools, XcodeGen when needed, simulator runtimes, xcodebuild/xcrun/altool, build Keychain, signing identities, provisioning, a physical iPhone, disk space. Returns passed/failed/pending/blocked findings with exact fixes; never secret values. Readiness is not a successful build.", parameters: schema({ physicalDeviceWanted: { type: "boolean" } }) },
   { name: "ios_release_audit", description: "Run the release-readiness audit: bundle ID, version/build, signing, icons, debug-only settings and development endpoints, test status, privacy behavior, privacy/support files, App Store metadata, export compliance, review notes, screenshots, physical-device testing. Returns machine-readable findings grouped as passed/failed/pending/blocked plus a short report. Placeholders are reported as pending user input, never as passed.", parameters: schema({}) },
@@ -95,8 +104,40 @@ async function readiness(ctx: IosToolContext, discovery: IosDiscovery, physicalD
   return inspectIosReadiness(deps.host, discovery, deps.project.setupCommand, { run: ctx.run ?? sshScript }, physicalDeviceWanted);
 }
 
+async function recentRuns(ctx: IosToolContext, id?: string): Promise<ToolResult> {
+  const base = runsDir(ctx.repo);
+  if (id) {
+    if (!/^[A-Za-z0-9._-]{4,120}$/.test(id)) throw new Error("That is not a run id from ios_recent_runs.");
+    const log = await readTextFile(path.join(base, id, "output.log"), "utf8").catch(() => undefined);
+    const result = await readTextFile(path.join(base, id, "result.json"), "utf8").catch(() => undefined);
+    if (!log && !result) return { content: "No such run.", isError: true };
+    return done({ id, output_tail: redactSecrets((log ?? "").slice(-6000)), result: result ? (() => { try { const { output: _omit, ...rest } = JSON.parse(result) as Record<string, unknown>; return rest; } catch { return undefined; } })() : undefined });
+  }
+  const names = (await readdir(base).catch(() => [] as string[])).filter((name) => name !== "artifacts").sort().reverse().slice(0, 10);
+  const runs = [];
+  for (const name of names) {
+    try {
+      const record = JSON.parse(await readTextFile(path.join(base, name, "result.json"), "utf8")) as { operation?: string; status?: string; summary?: string; failureClass?: string; context?: { at?: string } };
+      runs.push({ id: name, operation: record.operation, status: record.status, failureClass: record.failureClass, summary: record.summary, at: record.context?.at });
+    } catch { /* skip unreadable record */ }
+  }
+  return done({ runs });
+}
+
 export async function executeIosTool(name: string, args: Record<string, unknown>, ctx: IosToolContext): Promise<ToolResult> {
   if (!isIosTool(name)) throw new Error(`Tool not available: ${name}`);
+  if (name === "ios_playbook") {
+    const topic = typeof args.topic === "string" ? playbookTopic(args.topic.trim().toLowerCase()) : undefined;
+    if (topic) return { content: JSON.stringify({ topic: topic.id, title: topic.title, text: topic.text }) };
+    return { content: JSON.stringify({ topics: playbookIndex(), note: typeof args.topic === "string" && args.topic ? `Unknown topic "${args.topic}".` : "Pass topic to read one." }), isError: Boolean(args.topic) };
+  }
+  if (name === "ios_mac_maintenance") {
+    const action = String(args.action) as MaintenanceAction;
+    if (!MAINTENANCE_ACTIONS.includes(action)) throw new Error(`Unknown maintenance action: ${args.action}`);
+    const result = await runMaintenance(action, (await operationDeps(ctx)).host, ctx.run);
+    return done(result, !result.ok);
+  }
+  if (name === "ios_recent_runs") return recentRuns(ctx, typeof args.id === "string" ? args.id : undefined);
   const discovery = await discoverIosProject(ctx.root);
   const context = await captureRunContext(ctx.root);
 

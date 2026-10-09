@@ -24,7 +24,7 @@ const ctx = (repo: IosRepo, extra: Record<string, unknown> = {}) => ({ root: rep
 
 test("the agent tool surface is typed, has no shell access, and cannot grant permissions or submit", () => {
   const tools = iosTools();
-  assert.deepEqual(IOS_TOOL_NAMES.sort(), ["ios_check_readiness", "ios_discover_project", "ios_prepare_release", "ios_release_audit", "ios_release_preflight", "ios_release_status", "ios_run_operation", "ios_screenshot_requirements"]);
+  assert.deepEqual(IOS_TOOL_NAMES.sort(), ["ios_check_readiness", "ios_discover_project", "ios_mac_maintenance", "ios_playbook", "ios_prepare_release", "ios_recent_runs", "ios_release_audit", "ios_release_preflight", "ios_release_status", "ios_run_operation", "ios_screenshot_requirements"]);
   for (const tool of tools) {
     const properties = Object.keys((tool.parameters as { properties: object }).properties);
     assert.ok(!properties.some((name) => /command|shell|script|args|path|secret|password|key/i.test(name)), `${tool.name}: ${properties.join(",")}`);
@@ -34,7 +34,7 @@ test("the agent tool surface is typed, has no shell access, and cannot grant per
   const operation = tools.find((tool) => tool.name === "ios_run_operation")!.parameters as { properties: { operation: { enum: string[] } } };
   assert.ok(!operation.properties.operation.enum.some((name) => /submit|review/.test(name)));
   assert.match(tools.find((tool) => tool.name === "ios_run_operation")!.description, /never submits for App Review/);
-  assert.match(roster.hollis.systemPrompt, /Never submit an app for App Review/);
+  assert.match(roster.hollis.systemPrompt, /never submit for App Review/i);
   assert.match(roster.hollis.systemPrompt, /verified=true/);
 });
 
@@ -215,7 +215,41 @@ test("only Hollis receives the iOS tools in team chat, and they execute against 
       assert.equal(await messageTeamPersona(state.runDir, "hollis", "where are we?", provider("hollis")), "bundle=com.acme.app");
       await messageTeamPersona(state.runDir, "kit", "hi", provider("kit"));
       assert.ok(seen.hollis.includes("ios_run_operation") && seen.hollis.includes("ios_release_status"));
-      assert.ok(!seen.kit.some((name) => name.startsWith("ios_")));
+      assert.ok(!seen.kit.some((name) => name.startsWith("ios_") || name.startsWith("web_")));
+      for (const extra of ["ios_playbook", "ios_open_release_workspace", "ios_commit_release_changes", "web_search", "web_fetch", "apply_patch"]) assert.ok(seen.hollis.includes(extra), extra);
+    });
+  } finally { await repo.cleanup(); }
+});
+
+test("through team chat Hollis can read the playbook, open a release workspace, edit and commit locally; the user's checkout stays untouched", async () => {
+  const repo = await iosRepo(healthyApp());
+  try {
+    await git(repo.root, ["add", "-A"]);
+    await git(repo.root, ["commit", "-qm", "ios app"]);
+    await withData(repo, async () => {
+      const state = await createRunState(repo.root, "Prepare the release", await git(repo.root, ["rev-parse", "HEAD"]));
+      const steps: string[] = [];
+      const hollis: ToolCapableProvider = {
+        name: "hollis",
+        async generate() { return { text: "ok" }; },
+        async generateWithTools(request: ToolRequest): Promise<ToolResponse> {
+          const call = async (name: string, args: Record<string, unknown>) => { steps.push(name); return request.execute(name, args); };
+          assert.match(JSON.parse((await call("ios_playbook", { topic: "troubleshooting" })).content).text, /Cloud signing permission error/);
+          const refused = await call("apply_patch", { path: "RELEASE_NOTES.md", oldText: "", newText: "v1\n" });
+          assert.equal(refused.isError, true);
+          const opened = JSON.parse((await call("ios_open_release_workspace", {})).content);
+          const patched = await call("apply_patch", { path: "RELEASE_NOTES.md", oldText: "", newText: "v1\n" });
+          assert.notEqual(patched.isError, true, patched.content);
+          const commit = JSON.parse((await call("ios_commit_release_changes", { message: "Add release notes" })).content);
+          return { text: `branch=${opened.branch} committed=${commit.committed}`, toolCalls: steps.length };
+        },
+      };
+      const reply = await messageTeamPersona(state.runDir, "hollis", "prepare the release notes", hollis);
+      assert.match(reply, /branch=codex\/hollis-release-[a-z0-9]+ committed=true/);
+      assert.deepEqual(steps, ["ios_playbook", "apply_patch", "ios_open_release_workspace", "apply_patch", "ios_commit_release_changes"]);
+      assert.equal(await git(repo.root, ["status", "--porcelain"]), "", "the user's checkout is unchanged");
+      assert.equal(await git(repo.root, ["rev-parse", "HEAD"]), state.baseCommit, "the user's branch did not move");
+      assert.doesNotMatch(await git(repo.root, ["branch", "--show-current"]), /hollis/);
     });
   } finally { await repo.cleanup(); }
 });
