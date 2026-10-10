@@ -196,6 +196,8 @@ test("a human answer resumes a blocked worker in the same worktree", async () =>
   const blocked = await runTeamGoal(root, "Edit note", providers);
   assert.equal(blocked.status, "blocked");
   assert.match(blocked.tasks[0].error ?? "", /NEEDS_INPUT/);
+  assert.doesNotMatch(blocked.tasks[0].error ?? "", /Marlow/);
+  assert.match(blocked.tasks[0].triageNote ?? "", /^Marlow could not resolve this/);
   const worktree = blocked.tasks[0].worktree?.path;
   const resumed = await answerTeamRun(blocked.runDir, "Use bright", providers);
   assert.equal(resumed.status, "awaiting-review");
@@ -203,4 +205,41 @@ test("a human answer resumes a blocked worker in the same worktree", async () =>
   assert.equal(workerCalls, 2);
   assert.equal(resumed.decisions?.[0].answer, "Use bright");
   assert.equal((await readFile(path.join(resumed.staging!.path, "note.txt"), "utf8")).replaceAll("\r\n", "\n"), "bright world\n");
+});
+
+test("Marlow answers a worker's question before the human is asked", async () => {
+  const { root, parent } = await tempRepo();
+  cleanup.push({ parent, home: repoHome(root) });
+  let workerCalls = 0;
+  function fake(name: string): ModelProvider & { generateWithTools(request: ToolRequest): Promise<ToolResponse> } {
+    return {
+      name,
+      async generate(): Promise<ModelResponse> { return { text: "summary" }; },
+      async generateWithTools(request: ToolRequest): Promise<ToolResponse> {
+        if (name === "marlow") {
+          if (request.userPrompt.includes("A teammate is blocked")) return { text: "GUIDANCE: Use bright.", toolCalls: 0 };
+          return { text: JSON.stringify({ summary: "Edit note", tasks: [{ id: "edit", title: "Edit note", worker: "kit", dependsOn: [] }] }), toolCalls: 0 };
+        }
+        if (name === "kit") {
+          workerCalls++;
+          if (workerCalls === 1) return { text: "NEEDS_INPUT: Which word should replace hello?", toolCalls: 0 };
+          assert.match(request.userPrompt, /from Marlow, the lead\) Use bright/);
+          await request.execute("apply_patch", { path: "note.txt", oldText: "hello", newText: "bright" });
+          return { text: "edited", toolCalls: 1 };
+        }
+        if (name === "rowan") return { text: "APPROVED: correct", toolCalls: 0 };
+        if (name === "tove") return { text: "PASS: correct", toolCalls: 0 };
+        return { text: "research", toolCalls: 0 };
+      },
+    };
+  }
+  const providers: TeamProviders = {
+    marlow: fake("marlow"), juniper: fake("juniper"), kit: fake("kit"),
+    wren: fake("wren"), rowan: fake("rowan"), tove: fake("tove"), piper: fake("piper"),
+  };
+  const state = await runTeamGoal(root, "Edit note", providers);
+  assert.equal(state.status, "awaiting-review");
+  assert.equal(workerCalls, 2);
+  assert.match(state.decisions?.[0].answer ?? "", /^Marlow: Use bright/);
+  assert.equal(state.tasks[0].triageLog?.[0].guidance, "Use bright.");
 });

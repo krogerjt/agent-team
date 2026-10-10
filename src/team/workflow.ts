@@ -140,6 +140,61 @@ function needsRepair(review: string, qa: string, checks: CheckResult[]): boolean
     !/^APPROVED:/i.test(review.trim()) || !/^PASS:/i.test(qa.trim());
 }
 
+/** The worker who owns the task reconciles a conflicted merge in place; true only if no markers remain and the merge committed. */
+async function resolveMergeConflicts(
+  state: TeamRunState, task: TeamTask, cwd: string, files: string[],
+  worker: ToolCapableProvider, tools: WorkspaceTools, identity: string[],
+): Promise<boolean> {
+  if (!files.length) return false;
+  await recordRunEvent(state, task.worker, "conflict", files.join(", "), { taskId: task.id, summary: `Reconciling merge conflicts for ${task.title}` });
+  try {
+    await askWithTools(state, task.worker, worker,
+      `Goal: ${state.goal}\nYour task "${task.title}" is mid-merge with work that parallel tasks already landed, and these files contain git conflict markers: ${files.join(", ")}.\nOpen each file, keep BOTH sides' intent (your task's changes plus the already-merged work), and remove every <<<<<<<, =======, >>>>>>> marker using apply_patch. Do not drop the other tasks' changes. Do not run git commands.`,
+      tools, true, task.id);
+    for (const file of files) {
+      const text = await readFile(path.join(cwd, file), "utf8").catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? "" : undefined);
+      if (text === undefined || /^(<{7}|>{7})( |$)/m.test(text)) return false;
+    }
+    await git(cwd, ["add", "-A"]);
+    await git(cwd, [...identity, "commit", "--no-edit"]);
+    await recordRunEvent(state, task.worker, "conflict-resolved", files.join(", "), { taskId: task.id, summary: `Resolved merge conflicts for ${task.title}` });
+    return true;
+  } catch (error) {
+    await logEvent(state, task.worker, "conflict-unresolved", error instanceof Error ? error.message : String(error));
+    return false;
+  }
+}
+
+const MAX_TRIAGE_ATTEMPTS = 2;
+
+/** Before a blocked task reaches the human, Marlow (the lead) gets to answer it. Returns guidance to retry with, or undefined to escalate. */
+async function triageBlock(state: TeamRunState, task: TeamTask, taskState: TaskState, providers: TeamProviders, library: string): Promise<string | undefined> {
+  const attempts = taskState.triageAttempts ?? 0;
+  const error = taskState.error ?? "";
+  // Host setup (Mac, Xcode, Keychain) is something only the human can change.
+  if (attempts >= MAX_TRIAGE_ATTEMPTS || /needs environment setup/.test(error)) return undefined;
+  taskState.triageAttempts = attempts + 1;
+  await saveState(state);
+  try {
+    const reply = await askWithTools(state, "marlow", requireToolProvider(providers.marlow),
+      `A teammate is blocked and the human has not been asked yet. You are the lead: decide yourself whenever the goal, the plan and the repository let you.\nGoal: ${state.goal}\nTask: ${task.title} (worker: ${roster[task.worker].name})\nPlan: ${JSON.stringify(state.plan?.tasks)}\nShared library:\n${library || "(empty)"}\nWhy it is blocked:\n${error.slice(0, 6_000)}\nAttempt ${attempts + 1} of ${MAX_TRIAGE_ATTEMPTS}. Inspect the worktree if useful; do not edit files.\nReply with exactly one of:\nGUIDANCE: <concrete direction the worker will receive, such as how to answer its question, how to combine overlapping work, or what to fix after review>\nESCALATE: <the exact question only a human can answer, such as credentials, a product preference nothing implies, or machine setup>`,
+      new WorkspaceTools(taskState.worktree?.path ?? state.staging!.path, "researcher"), true, task.id);
+    const guidance = /^GUIDANCE:\s*([\s\S]+)/i.exec(reply.trim())?.[1].trim();
+    if (guidance) {
+      state.decisions ??= [];
+      state.decisions.push({ taskId: task.id, answer: `Marlow: ${guidance}`, at: new Date().toISOString() });
+      await recordRunEvent(state, "marlow", "triage", guidance, { taskId: task.id, summary: `Marlow unblocked ${task.title} without asking the human` });
+      (taskState.triageLog ??= []).push({ guidance, at: new Date().toISOString() });
+      await saveState(state);
+      return `(from Marlow, the lead) ${guidance}`;
+    }
+    taskState.triageNote = `Marlow could not resolve this and is escalating: ${reply.replace(/^ESCALATE:\s*/i, "").trim()}`;
+  } catch (triageError) {
+    taskState.triageNote = `Marlow's triage was unavailable: ${triageError instanceof Error ? triageError.message : String(triageError)}`;
+  }
+  return undefined;
+}
+
 async function executeTask(
   state: TeamRunState, task: TeamTask, taskState: TaskState,
   providers: TeamProviders, library: string, answer?: string,
@@ -147,6 +202,7 @@ async function executeTask(
   const staging = state.staging!;
   taskState.status = "doing";
   taskState.error = undefined;
+  taskState.triageNote = undefined;
   await saveState(state);
   let worktree = taskState.worktree;
   if (!worktree) {
@@ -228,9 +284,12 @@ async function executeTask(
       // Parallel tasks landed after this worktree branched; fold them in, then re-verify the combined code.
       try { await git(worktree.path, [...identity, "merge", "--no-edit", staging.branch]); }
       catch (error) {
-        await git(worktree.path, ["merge", "--abort"]).catch(() => undefined);
-        await uncommit();
-        throw new Error(`${task.title} conflicts with work already merged from parallel tasks. Add a dependency between the overlapping tasks or resolve it by hand. ${error instanceof Error ? error.message : String(error)}`);
+        const conflicted = (await git(worktree.path, ["diff", "--name-only", "--diff-filter=U"]).catch(() => "")).split("\n").filter(Boolean);
+        if (!await resolveMergeConflicts(state, task, worktree.path, conflicted, worker, tools, identity)) {
+          await git(worktree.path, ["merge", "--abort"]).catch(() => undefined);
+          await uncommit();
+          throw new Error(`${task.title} conflicts with work already merged from parallel tasks (${conflicted.join(", ") || "no conflict files reported"}), and ${roster[task.worker].name} could not reconcile it. ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
       checks = await runChecks(worktree.path, { repo: state.repo, runDir: state.runDir, taskId: `${task.id}-merged` });
       taskState.checks = checks;
@@ -258,15 +317,20 @@ async function advanceRun(state: TeamRunState, providers: TeamProviders, library
   const isDone = (id: string) => state.tasks.find((item) => item.id === id)?.status === "done";
   const run = async (task: TeamTask): Promise<void> => {
     const taskState = state.tasks.find((item) => item.id === task.id)!;
-    const taskAnswer = taskState.status === "blocked" && (!answerTaskId || answerTaskId === task.id) ? answer : undefined;
-    try {
-      if (!await executeTask(state, task, taskState, providers, library, taskAnswer)) state.status = "blocked";
-    } catch (error) {
-      taskState.status = "blocked";
-      taskState.error = error instanceof Error ? error.message : String(error);
-      state.status = "blocked";
-      await recordRunEvent(state, task.worker, "error", taskState.error, { taskId: task.id, summary: `Blocked on ${task.title}` });
+    let guidance = taskState.status === "blocked" && (!answerTaskId || answerTaskId === task.id) ? answer : undefined;
+    if (guidance) taskState.triageAttempts = 0;
+    for (;;) {
+      try {
+        if (await executeTask(state, task, taskState, providers, library, guidance)) return;
+      } catch (error) {
+        taskState.status = "blocked";
+        taskState.error = error instanceof Error ? error.message : String(error);
+      }
+      guidance = await triageBlock(state, task, taskState, providers, library);
+      if (!guidance) break;
     }
+    state.status = "blocked";
+    await recordRunEvent(state, task.worker, "error", taskState.error ?? "Blocked.", { taskId: task.id, summary: `Blocked on ${task.title}` });
   };
   // Start every task whose dependencies are done, up to the limit. Once anything blocks, let running tasks
   // finish but start nothing new, matching the old stop-on-first-block behavior.
