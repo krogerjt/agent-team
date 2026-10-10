@@ -121,7 +121,7 @@ test("the playbook is complete, specific, and contains no real identifiers or se
   assert.equal(playbookIndex().split("\n").length, ids.length);
   for (const topic of PLAYBOOK) assert.ok(topic.text.length > 400, topic.id);
   const all = PLAYBOOK.map((topic) => topic.text).join("\n");
-  for (const must of ["ADMIN", "Cloud signing permission error", "GENERATE_INFOPLIST_FILE", "nested", "1206x2622", "1320x2868", "ITSAppUsesNonExemptEncryption", "database is locked", "/usr/bin/base64", "hasKeyboardFocus", "TEST_RUNNER", "Add for Review", "submit for review"]) assert.ok(new RegExp(must.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(all), must);
+  for (const must of ["ADMIN", "Cloud signing permission error", "GENERATE_INFOPLIST_FILE", "nested", "1206x2622", "1320x2868", "ITSAppUsesNonExemptEncryption", "database is locked", "/usr/bin/base64", "hasKeyboardFocus", "TEST_RUNNER", "Add for Review", "submit for review", "Guideline 2.1", "PHYSICAL device", "fan/community content policy"]) assert.ok(new RegExp(must.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(all), must);
   for (const real of ["HV633F9Y44", "7NQ3P6AS55", "L67J56VPBG", "de52025e", "krogerjt", "5135027321", "Boudinot", "GraveyardTracker"]) assert.ok(!all.includes(real), `playbook must not contain ${real}`);
   assert.equal(playbookTopic("troubleshooting")?.id, "troubleshooting"); assert.equal(playbookTopic("x"), undefined);
 });
