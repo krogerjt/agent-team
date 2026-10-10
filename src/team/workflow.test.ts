@@ -7,7 +7,7 @@ import { tempRepo } from "../coding/test-helpers.js";
 import { git } from "../coding/git.js";
 import type { ModelProvider, ModelRequest, ModelResponse, ToolRequest, ToolResponse } from "../core/provider.js";
 import { repoHome } from "./state.js";
-import { answerTeamRun, mergeTeamRun, messageTeamPersona, reviewTeamRun, runTeamGoal, type TeamProviders } from "./workflow.js";
+import { answerTeamRun, mergeTeamRun, messageTeamPersona, parseEscalation, reviewTeamRun, runTeamGoal, type TeamProviders } from "./workflow.js";
 
 const cleanup: Array<{ parent: string; home: string }> = [];
 after(async () => {
@@ -197,7 +197,7 @@ test("a human answer resumes a blocked worker in the same worktree", async () =>
   assert.equal(blocked.status, "blocked");
   assert.match(blocked.tasks[0].error ?? "", /NEEDS_INPUT/);
   assert.doesNotMatch(blocked.tasks[0].error ?? "", /Marlow/);
-  assert.match(blocked.tasks[0].triageNote ?? "", /^Marlow could not resolve this/);
+  assert.ok(blocked.tasks[0].triageNote?.summary);
   const worktree = blocked.tasks[0].worktree?.path;
   const resumed = await answerTeamRun(blocked.runDir, "Use bright", providers);
   assert.equal(resumed.status, "awaiting-review");
@@ -242,4 +242,12 @@ test("Marlow answers a worker's question before the human is asked", async () =>
   assert.equal(workerCalls, 2);
   assert.match(state.decisions?.[0].answer ?? "", /^Marlow: Use bright/);
   assert.equal(state.tasks[0].triageLog?.[0].guidance, "Use bright.");
+});
+
+test("Marlow's escalation is parsed into a plain-English summary, options and a recommendation", () => {
+  const note = parseEscalation("ESCALATE:\nSUMMARY: Kit needs to know which word to use. Nothing in the project says.\nOPTIONS:\n- Use the word bright\n2. Keep the original word\nRECOMMENDED: Use bright, since it matches the rest of the page.");
+  assert.equal(note.summary, "Kit needs to know which word to use. Nothing in the project says.");
+  assert.deepEqual(note.options, ["Use the word bright", "Keep the original word"]);
+  assert.match(note.recommended ?? "", /^Use bright/);
+  assert.deepEqual(parseEscalation("ESCALATE: Just a sentence.").options, []);
 });

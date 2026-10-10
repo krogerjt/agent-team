@@ -22,8 +22,8 @@ export interface TaskState {
   error?: string;
   /** How many times Marlow has tried to unblock this task before it goes to the human. */
   triageAttempts?: number;
-  /** Marlow's reasoning when he escalated this task to the human; kept apart from the worker's own error. */
-  triageNote?: string;
+  /** Marlow's plain-English note when he escalated this task to the human; kept apart from the worker's own error. */
+  triageNote?: { summary: string; options: string[]; recommended?: string };
   /** Guidance Marlow already gave this task's worker, so the human can see what was resolved without them. */
   triageLog?: Array<{ guidance: string; at: string }>;
 }
