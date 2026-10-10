@@ -167,6 +167,20 @@ async function resolveMergeConflicts(
 
 const MAX_TRIAGE_ATTEMPTS = 2;
 
+/** Reads Marlow's escalation (SUMMARY / OPTIONS / RECOMMENDED); anything unstructured becomes the summary. */
+export function parseEscalation(reply: string): NonNullable<TaskState["triageNote"]> {
+  const text = reply.replace(/^\s*ESCALATE:\s*/i, "").trim();
+  const sections: Record<string, string> = {};
+  let current: string | undefined;
+  for (const line of text.split("\n")) {
+    const heading = /^\s*(SUMMARY|OPTIONS|RECOMMENDED):\s*(.*)$/i.exec(line);
+    if (heading) { current = heading[1].toUpperCase(); sections[current] = heading[2]; }
+    else if (current) sections[current] += `\n${line}`;
+  }
+  const options = (sections.OPTIONS ?? "").split("\n").map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim()).filter(Boolean).slice(0, 4);
+  return { summary: (sections.SUMMARY?.trim() || text).slice(0, 1_200), options, recommended: sections.RECOMMENDED?.trim().slice(0, 500) || undefined };
+}
+
 /** Before a blocked task reaches the human, Marlow (the lead) gets to answer it. Returns guidance to retry with, or undefined to escalate. */
 async function triageBlock(state: TeamRunState, task: TeamTask, taskState: TaskState, providers: TeamProviders, library: string): Promise<string | undefined> {
   const attempts = taskState.triageAttempts ?? 0;
@@ -177,7 +191,7 @@ async function triageBlock(state: TeamRunState, task: TeamTask, taskState: TaskS
   await saveState(state);
   try {
     const reply = await askWithTools(state, "marlow", requireToolProvider(providers.marlow),
-      `A teammate is blocked and the human has not been asked yet. You are the lead: decide yourself whenever the goal, the plan and the repository let you.\nGoal: ${state.goal}\nTask: ${task.title} (worker: ${roster[task.worker].name})\nPlan: ${JSON.stringify(state.plan?.tasks)}\nShared library:\n${library || "(empty)"}\nWhy it is blocked:\n${error.slice(0, 6_000)}\nAttempt ${attempts + 1} of ${MAX_TRIAGE_ATTEMPTS}. Inspect the worktree if useful; do not edit files.\nReply with exactly one of:\nGUIDANCE: <concrete direction the worker will receive, such as how to answer its question, how to combine overlapping work, or what to fix after review>\nESCALATE: <the exact question only a human can answer, such as credentials, a product preference nothing implies, or machine setup>`,
+      `A teammate is blocked and the human has not been asked yet. You are the lead: decide yourself whenever the goal, the plan and the repository let you.\nGoal: ${state.goal}\nTask: ${task.title} (worker: ${roster[task.worker].name})\nPlan: ${JSON.stringify(state.plan?.tasks)}\nShared library:\n${library || "(empty)"}\nWhy it is blocked:\n${error.slice(0, 6_000)}\nAttempt ${attempts + 1} of ${MAX_TRIAGE_ATTEMPTS}. Inspect the worktree if useful; do not edit files.\nReply with exactly one of:\nGUIDANCE: <concrete direction the worker will receive, such as how to answer its question, how to combine overlapping work, or what to fix after review>\nor, only for something a human must decide (credentials, a product preference nothing implies, machine setup), this exact layout, written for a busy non-technical person with no jargon, file names or code terms:\nESCALATE:\nSUMMARY: <two or three plain sentences: what is going on and why it needs them>\nOPTIONS:\n- <a short answer they could send, written as an instruction>\n- <another>\nRECOMMENDED: <which option you would pick and why, in one sentence>`,
       new WorkspaceTools(taskState.worktree?.path ?? state.staging!.path, "researcher"), true, task.id);
     const guidance = /^GUIDANCE:\s*([\s\S]+)/i.exec(reply.trim())?.[1].trim();
     if (guidance) {
@@ -188,9 +202,9 @@ async function triageBlock(state: TeamRunState, task: TeamTask, taskState: TaskS
       await saveState(state);
       return `(from Marlow, the lead) ${guidance}`;
     }
-    taskState.triageNote = `Marlow could not resolve this and is escalating: ${reply.replace(/^ESCALATE:\s*/i, "").trim()}`;
-  } catch (triageError) {
-    taskState.triageNote = `Marlow's triage was unavailable: ${triageError instanceof Error ? triageError.message : String(triageError)}`;
+    taskState.triageNote = parseEscalation(reply);
+  } catch {
+    taskState.triageNote = { summary: "Marlow could not look at this one, so it came straight to you. The technical details are below.", options: [] };
   }
   return undefined;
 }
