@@ -115,13 +115,16 @@ function blockedTaskBrief(run, task) {
     task: taskLabel(task, run),
     summary: task.error || "The task is blocked and cannot continue automatically.",
     findings: findings.slice(0, 4),
+    marlowNote: task.triageNote,
+    resolved: (task.triageLog || []).map((entry) => entry.guidance),
   };
 }
 
 function blockedTaskDetails(run, task) {
   const brief = blockedTaskBrief(run, task);
+  const workerName = profile(run.plan?.tasks.find((item) => item.id === task.id)?.worker)?.name || "the worker";
   const findings = brief.findings.map((finding) => `<li><strong>${escapeHtml(finding.label)}:</strong> ${escapeHtml(finding.text)}</li>`).join("");
-  return `<div class="prompt-request"><div><strong>Task</strong><span>${escapeHtml(brief.task)}</span></div><div><strong>What happened</strong><span>${escapeHtml(brief.summary)}</span></div>${findings ? `<div><strong>Still needs attention</strong><ul>${findings}</ul></div>` : ""}<div><strong>What to send</strong><span>Tell ${escapeHtml(profile(run.plan?.tasks.find((item) => item.id === task.id)?.worker)?.name || "the team")} what to prioritize, clarify the expected behavior, or confirm an acceptable trade-off.</span></div></div>`;
+  return `<div class="prompt-request"><div><strong>Task</strong><span>${escapeHtml(brief.task)}</span></div><div><strong>What happened</strong><span>${escapeHtml(brief.summary)}</span></div>${findings ? `<div><strong>Still needs attention</strong><ul>${findings}</ul></div>` : ""}${brief.resolved.length ? `<div><strong>Marlow already told ${escapeHtml(workerName)}</strong><ul>${brief.resolved.map((text) => `<li>${escapeHtml(text)}</li>`).join("")}</ul></div>` : ""}${brief.marlowNote ? `<div><strong>Marlow's take</strong><span>${escapeHtml(brief.marlowNote)}</span></div>` : ""}<div><strong>What to send</strong><span>Tell ${escapeHtml(profile(run.plan?.tasks.find((item) => item.id === task.id)?.worker)?.name || "the team")} what to prioritize, clarify the expected behavior, or confirm an acceptable trade-off.</span></div></div>`;
 }
 // Active until the persona returns a result (or hits a budget); the age cap covers a run that died mid-work.
 function recentlyActive(persona, staleMs = 600_000) {
