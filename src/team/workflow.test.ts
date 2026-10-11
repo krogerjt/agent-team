@@ -167,6 +167,32 @@ test("unresolved review blocks integration and merge after one repair pass", asy
   await assert.rejects(() => mergeTeamRun(state.runDir), /not ready/);
 });
 
+test("a plan reply that fails twice reports Marlow's raw reply and saves both replies", async () => {
+  const { root, parent } = await tempRepo();
+  cleanup.push({ parent, home: repoHome(root) });
+  let retryTokens: number | undefined;
+  const cutOff = `{"summary":"I read the repository. Kit covers the audit and Hollis's release work is split","tasks":[{"id":"audit","title":"Check force unwraps`;
+  const fake = (name: string): TeamProviders["marlow"] => ({
+    name,
+    async generate(request: ModelRequest): Promise<ModelResponse> {
+      if (name === "marlow") retryTokens = request.maxOutputTokens;
+      return { text: cutOff };
+    },
+    async generateWithTools(): Promise<ToolResponse> { return { text: `Here is the plan:\n\`\`\`json\n${cutOff}`, toolCalls: 0 }; },
+  } as ModelProvider & { generateWithTools(): Promise<ToolResponse> });
+  const providers: TeamProviders = {
+    marlow: fake("marlow"), juniper: fake("juniper"), kit: fake("kit"),
+    wren: fake("wren"), rowan: fake("rowan"), tove: fake("tove"), piper: fake("piper"),
+  };
+  const error = await runTeamGoal(root, "Get the app ready for release", providers).then(() => undefined, (caught: Error) => caught);
+  assert.ok(error);
+  assert.match(error.message, /valid JSON plan.*cut off/);
+  assert.match(error.message, /Marlow's reply:\n\{"summary":"I read the repository/);
+  const saved = error.message.match(/Full replies saved at: (.+)/)![1].split("\n")[0].trim();
+  assert.match(await readFile(saved, "utf8"), /First reply:\nHere is the plan:[\s\S]*Retry reply:/);
+  assert.ok((retryTokens ?? 0) >= 8192, "the retry has room for a long plan");
+});
+
 test("a human answer resumes a blocked worker in the same worktree", async () => {
   const { root, parent } = await tempRepo();
   cleanup.push({ parent, home: repoHome(root) });
