@@ -27,10 +27,11 @@ export function parsePlan(text: string): TeamPlan {
   const tasks: TeamTask[] = raw.tasks.map((entry: unknown) => {
     const task = object(entry);
     if (typeof task.id !== "string" || !/^[a-z][a-z0-9-]{0,30}$/.test(task.id)) throw new Error("Task IDs must be short lowercase slugs.");
-    if (typeof task.title !== "string" || !task.title.trim() || task.title.length > 200) throw new Error(`Task ${task.id} needs a short title.`);
+    const rawTitle = [task.title, task.name, task.description, task.summary].find((value): value is string => typeof value === "string" && value.trim() !== "");
+    if (rawTitle === undefined || rawTitle.length > 200) throw new Error(`Task ${task.id} needs a short title in a "title" field (200 characters or fewer).`);
     if (task.worker !== "kit" && task.worker !== "wren" && task.worker !== "rowan") throw new Error(`Task ${task.id} has an unknown worker.`);
     if (!Array.isArray(task.dependsOn) || !task.dependsOn.every((id: unknown) => typeof id === "string")) throw new Error(`Task ${task.id} has invalid dependencies.`);
-    return { id: task.id, title: task.title.trim(), worker: task.worker, dependsOn: task.dependsOn };
+    return { id: task.id, title: rawTitle.trim(), worker: task.worker, dependsOn: task.dependsOn };
   });
   const ids = new Set(tasks.map((task) => task.id));
   if (ids.size !== tasks.length) throw new Error("Task IDs must be unique.");

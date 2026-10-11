@@ -603,11 +603,20 @@ export async function runTeamGoal(repoPath: string, goal: string, injectedProvid
     try {
       state.plan = parsePlan(planText);
     } catch (error) {
+      await logEvent(state, "host", "plan-invalid", `${error instanceof Error ? error.message : String(error)}
+${planText}`);
       const corrected = await generateFor(state, "marlow", providers.marlow, {
         systemPrompt: roster.marlow.systemPrompt,
-        userPrompt: `Your previous plan was invalid: ${error instanceof Error ? error.message : String(error)}. Return ONLY corrected JSON with summary and 1-4 tasks. Previous response:\n${planText.slice(0, 8_000)}`,
+        userPrompt: `Your previous plan was invalid: ${error instanceof Error ? error.message : String(error)}. Return ONLY a JSON object with exactly this shape, and every task must have a short "title" string: {"summary":"...","tasks":[{"id":"short-slug","title":"specific coding task","worker":"kit|wren|rowan","dependsOn":[]}]}. Use 1-4 tasks. Previous response:
+${planText.slice(0, 8_000)}`,
       });
-      state.plan = parsePlan(corrected.text);
+      try {
+        state.plan = parsePlan(corrected.text);
+      } catch (retryError) {
+        await logEvent(state, "host", "plan-invalid", `Retry failed: ${retryError instanceof Error ? retryError.message : String(retryError)}
+${corrected.text}`);
+        throw retryError;
+      }
     }
     state.tasks = state.plan.tasks.map((task) => ({ id: task.id, status: "todo" }));
     await saveState(state);
