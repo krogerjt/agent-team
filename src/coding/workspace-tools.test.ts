@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, mock, test } from "node:test";
-import { readFile, rm } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { WorkspaceTools } from "./workspace-tools.js";
@@ -90,4 +90,13 @@ test("AI artwork requests PNG and normalizes opacity without a live API call", a
     if (key === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = key;
     if (model === undefined) delete process.env.AGENT_TEAM_IMAGE_MODEL; else process.env.AGENT_TEAM_IMAGE_MODEL = model;
   }
+});
+
+test("patches CRLF files with LF-joined text and keeps CRLF endings", async () => {
+  const { root, parent } = await tempRepo();
+  cleanup.push(parent);
+  const lead = new WorkspaceTools(root, "lead");
+  await writeFile(path.join(root, "note.txt"), "<<<<<<< ours\r\nmine\r\n=======\r\ntheirs\r\n>>>>>>> theirs\r\nend\r\n");
+  await lead.execute("apply_patch", { path: "note.txt", oldText: "<<<<<<< ours\nmine\n=======\ntheirs\n>>>>>>> theirs\n", newText: "mine\ntheirs\n" });
+  assert.equal(await readFile(path.join(root, "note.txt"), "utf8"), "mine\r\ntheirs\r\nend\r\n");
 });

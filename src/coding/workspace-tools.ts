@@ -46,6 +46,17 @@ const generateImageTool: ToolDefinition = {
   parameters: schema({ prompt: { type: "string" }, path: { type: "string" }, background: { type: "string", description: "Opaque #RRGGBB background." } }, ["prompt", "path", "background"]),
 };
 
+/**
+ * Converts a patch to CRLF when the target file uses CRLF, so a model sending "\n"-joined text can still patch a
+ * Windows checkout and its new lines don't leave the file with mixed endings. Mixed-ending files keep exact matching.
+ */
+export function matchLineEndings(file: string, oldText: string, newText: string): { oldText: string; newText: string } {
+  if (!file.includes("\r\n")) return { oldText, newText };
+  const crlf = (text: string) => text.replace(/\r?\n/g, "\r\n");
+  const converted = crlf(oldText);
+  return file.includes(converted) ? { oldText: converted, newText: crlf(newText) } : { oldText, newText };
+}
+
 function stringArg(args: Record<string, unknown>, name: string): string {
   if (typeof args[name] !== "string") throw new Error(`${name} must be a string.`);
   return args[name];
@@ -211,8 +222,8 @@ export class WorkspaceTools {
     }
     if (name === "apply_patch" && this.mode === "lead") {
       const relative = stringArg(args, "path");
-      const oldText = stringArg(args, "oldText");
-      const newText = stringArg(args, "newText");
+      let oldText = stringArg(args, "oldText");
+      let newText = stringArg(args, "newText");
       if (newText.length > 100_000) throw new Error("Patch content is too large.");
       const target = await this.safePath(relative);
       let exists = true;
@@ -232,6 +243,8 @@ export class WorkspaceTools {
       if (!oldText) throw new Error("Existing files require non-empty oldText.");
       const previous = await readFile(target.absolute, "utf8");
       if (previous.length > 100_000) throw new Error("File is too large to patch.");
+      // Windows checkouts (core.autocrlf) use CRLF, but models send "\n"; match and write in the file's own line endings.
+      ({ oldText, newText } = matchLineEndings(previous, oldText, newText));
       const first = previous.indexOf(oldText);
       const second = first >= 0 ? previous.indexOf(oldText, first + oldText.length) : -1;
       if (first < 0 || second >= 0) {

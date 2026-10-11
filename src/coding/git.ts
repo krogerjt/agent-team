@@ -10,9 +10,30 @@ export async function git(cwd: string, args: string[], options: { timeout?: numb
     const { stdout } = await execFileAsync("git", args, { cwd, maxBuffer: 4_000_000, windowsHide: true, timeout: options.timeout, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
     return stdout.trimEnd();
   } catch (error) {
-    const detail = error && typeof error === "object" && "stderr" in error ? String(error.stderr).trim() : String(error);
-    throw new Error(`git ${args[0]} failed: ${detail}`);
+    throw new Error(`git ${gitCommandName(args)} failed: ${gitErrorDetail(error)}`);
   }
+}
+
+/** The subcommand, skipping leading global options such as `-c key=value`, so errors say "merge" rather than "-c". */
+export function gitCommandName(args: string[]): string {
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "-c" || args[i] === "-C") { i++; continue; }
+    if (!args[i].startsWith("-")) return args[i];
+  }
+  return args[0] ?? "";
+}
+
+/** Git reports some failures (notably merge conflicts) on stdout with an empty stderr, so fall back to stdout and the exit code. */
+export function gitErrorDetail(error: unknown): string {
+  if (!error || typeof error !== "object") return String(error);
+  const fields = error as { stderr?: unknown; stdout?: unknown; code?: unknown; signal?: unknown; message?: unknown };
+  const stderr = String(fields.stderr ?? "").trim();
+  const stdout = String(fields.stdout ?? "").trim();
+  const output = [stderr, stdout].filter(Boolean).join("\n").slice(0, 4_000);
+  if (output) return output;
+  if (fields.signal) return `terminated by ${String(fields.signal)}`;
+  if (typeof fields.code === "number") return `exit code ${fields.code} with no output`;
+  return String(fields.message ?? error);
 }
 
 export async function resolveCleanRepo(input: string): Promise<string> {
