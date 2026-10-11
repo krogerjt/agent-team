@@ -7,6 +7,7 @@ import { tempRepo } from "../coding/test-helpers.js";
 import { git } from "../coding/git.js";
 import type { ModelProvider, ModelRequest, ModelResponse, ToolRequest, ToolResponse } from "../core/provider.js";
 import { repoHome } from "./state.js";
+import { deleteTeamRun } from "./run-cleanup.js";
 import { answerTeamRun, mergeTeamRun, messageTeamPersona, parseEscalation, reviewTeamRun, runTeamGoal, type TeamProviders } from "./workflow.js";
 
 const cleanup: Array<{ parent: string; home: string }> = [];
@@ -250,4 +251,68 @@ test("Marlow's escalation is parsed into a plain-English summary, options and a 
   assert.deepEqual(note.options, ["Use the word bright", "Keep the original word"]);
   assert.match(note.recommended ?? "", /^Use bright/);
   assert.deepEqual(parseEscalation("ESCALATE: Just a sentence.").options, []);
+});
+
+function blockedThenAnswerProviders(): TeamProviders {
+  let workerCalls = 0;
+  function fake(name: string): ModelProvider & { generateWithTools(request: ToolRequest): Promise<ToolResponse> } {
+    return {
+      name,
+      async generate(): Promise<ModelResponse> { return { text: "summary" }; },
+      async generateWithTools(request: ToolRequest): Promise<ToolResponse> {
+        if (name === "marlow") {
+          if (request.userPrompt.includes("A teammate is blocked")) return { text: "ESCALATE:\nSUMMARY: Need a word.\nOPTIONS:\n- bright\nRECOMMENDED: bright", toolCalls: 0 };
+          return { text: JSON.stringify({ summary: "Edit note", tasks: [{ id: "edit", title: "Edit note", worker: "kit", dependsOn: [] }] }), toolCalls: 0 };
+        }
+        if (name === "kit") {
+          workerCalls++;
+          if (workerCalls === 1) return { text: "NEEDS_INPUT: Which word should replace hello?", toolCalls: 0 };
+          await request.execute("apply_patch", { path: "note.txt", oldText: "hello", newText: "bright" });
+          return { text: "edited", toolCalls: 1 };
+        }
+        if (name === "rowan") return { text: "APPROVED: correct", toolCalls: 0 };
+        if (name === "tove") return { text: "PASS: correct", toolCalls: 0 };
+        return { text: "research", toolCalls: 0 };
+      },
+    };
+  }
+  return { marlow: fake("marlow"), juniper: fake("juniper"), kit: fake("kit"), wren: fake("wren"), rowan: fake("rowan"), tove: fake("tove"), piper: fake("piper") };
+}
+
+test("answering a blocked run after the checkout moved on brings the run up to date and continues", async () => {
+  const { root, parent } = await tempRepo();
+  cleanup.push({ parent, home: repoHome(root) });
+  const providers = blockedThenAnswerProviders();
+  const blocked = await runTeamGoal(root, "Edit note", providers);
+  assert.equal(blocked.status, "blocked");
+  await writeFile(path.join(root, "other.txt"), "merged elsewhere\n");
+  await git(root, ["add", "."]);
+  await git(root, ["commit", "-qm", "parallel run merged"]);
+  const head = await git(root, ["rev-parse", "HEAD"]);
+  const resumed = await answerTeamRun(blocked.runDir, "bright", providers);
+  assert.equal(resumed.status, "awaiting-review");
+  assert.equal(resumed.baseCommit, head);
+  const staged = resumed.staging!.path;
+  assert.equal((await readFile(path.join(staged, "other.txt"), "utf8")).replaceAll("\r\n", "\n"), "merged elsewhere\n");
+  assert.equal((await readFile(path.join(staged, "note.txt"), "utf8")).replaceAll("\r\n", "\n"), "bright world\n");
+  const review = await reviewTeamRun(resumed.runDir);
+  assert.match(review.diff, /bright world/);
+  assert.doesNotMatch(review.diff, /merged elsewhere/);
+  const merged = await mergeTeamRun(resumed.runDir);
+  assert.equal(merged.status, "merged");
+});
+
+test("discarding a run removes its worktrees, branches and saved state but keeps merged code", async () => {
+  const { root, parent } = await tempRepo();
+  cleanup.push({ parent, home: repoHome(root) });
+  const blocked = await runTeamGoal(root, "Edit note", blockedThenAnswerProviders());
+  const dirs = [blocked.staging!.path, blocked.tasks[0].worktree!.path];
+  const result = await deleteTeamRun(blocked.runDir);
+  assert.equal(result.id, blocked.id);
+  assert.ok(result.removedWorktrees >= 2);
+  assert.ok(result.removedBranches.length >= 2);
+  assert.ok(!(await git(root, ["for-each-ref", "--format=%(refname:short)", "refs/heads/codex/"])).includes(blocked.id));
+  for (const dir of dirs) await assert.rejects(() => readFile(path.join(dir, "note.txt"), "utf8"), /ENOENT/);
+  await assert.rejects(() => readFile(path.join(blocked.runDir, "state.json"), "utf8"), /ENOENT/);
+  assert.equal(await readFile(path.join(root, "note.txt"), "utf8"), "hello world\n");
 });

@@ -37,3 +37,4 @@
 .summons-portrait{position:relative}
 .summons-portrait .avatar{position:static;transform:none;left:auto;bottom:auto;width:auto;height:80px;filter:none}
 .marlow-note{background:#262244;border:1px solid #6b5aa8;border-radius:8px;padding:11px 12px;margin:0 0 11px}.marlow-note p{margin:3px 0 0;line-height:1.45}.marlow-options{display:flex;flex-direction:column;gap:6px;margin-top:8px}.marlow-option{text-align:left;background:#34305a;color:#f1edfa;border:1px solid #6b5aa8;border-radius:6px;padding:7px 9px;cursor:pointer;font:inherit}.marlow-option:hover{background:#443f73}.marlow-recommend{margin-top:8px!important;font-weight:600}.marlow-note small{display:block;margin-top:6px;opacity:.7}.marlow-tech{margin:8px 0}.marlow-tech summary{cursor:pointer;opacity:.8}
+.discard-run{margin-top:12px;border-color:#7a4552;color:#f0b4bf}.discard-run:hover{background:#4a2a35}.discard-run.in-modal{display:block;margin:14px auto 0}
