@@ -633,6 +633,34 @@ ${corrected.text}`);
   }
 }
 
+/**
+ * A blocked run keeps working from the checkout it started on. When that checkout has moved on (other runs merged),
+ * fold the new commits into the staging branch and rebase the run's base, so the run resumes on current code instead
+ * of refusing to continue. Conflicts go to the blocked task's worker, as they do between parallel tasks.
+ */
+async function catchUpBlockedRun(state: TeamRunState, repo: string, blocked: TaskState, providers: TeamProviders): Promise<void> {
+  const head = await git(repo, ["rev-parse", "HEAD"]);
+  if (head === state.baseCommit) return;
+  const staging = state.staging!;
+  const task = state.plan!.tasks.find((item) => item.id === blocked.id);
+  if (await git(staging.path, ["status", "--porcelain", "--untracked-files=all"])) throw new Error(`The team's staging worktree has unsaved edits, so this run cannot be brought up to date: ${staging.path}`);
+  const identity = ["-c", "user.name=Agent Team", "-c", "user.email=agent-team@localhost.invalid"];
+  try { await git(staging.path, [...identity, "merge", "--no-edit", head]); }
+  catch (error) {
+    const conflicted = (await git(staging.path, ["diff", "--name-only", "--diff-filter=U"]).catch(() => "")).split("\n").filter(Boolean);
+    const resolved = Boolean(task) && await resolveMergeConflicts(state, task!, staging.path, conflicted, requireToolProvider(providers[task!.worker]), new WorkspaceTools(staging.path, "lead"), identity);
+    if (!resolved) {
+      await git(staging.path, ["merge", "--abort"]).catch(() => undefined);
+      throw new Error(`Your checkout moved on and this run's work conflicts with it (${conflicted.join(", ") || "no conflict files reported"}). The team could not reconcile it automatically; discard this run and start the goal again from the current code. ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  await stopPreview(state.id);
+  state.preview = undefined;
+  await logEvent(state, "host", "caught-up", `Brought the run up to date with ${head} (was based on ${state.baseCommit})`);
+  state.baseCommit = head;
+  await saveState(state);
+}
+
 export async function answerTeamRun(runDir: string, answer: string, injectedProviders?: TeamProviders): Promise<TeamRunState> {
   if (!answer.trim()) throw new Error("Provide a non-empty answer or guidance.");
   const state = await loadState(runDir);
@@ -640,7 +668,8 @@ export async function answerTeamRun(runDir: string, answer: string, injectedProv
   const blocked = state.tasks.find((task) => task.status === "blocked");
   if (!blocked) throw new Error("Run has no blocked task.");
   const repo = await resolveCleanRepo(state.repo);
-  if (await git(repo, ["rev-parse", "HEAD"]) !== state.baseCommit) throw new Error("Original checkout has advanced since this run.");
+  const providers = injectedProviders ?? await defaultProviders(repo);
+  await catchUpBlockedRun(state, repo, blocked, providers);
   state.decisions ??= [];
   state.decisions.push({ taskId: blocked.id, answer: answer.trim(), at: new Date().toISOString() });
   await logEvent(state, "user", "answer", `${blocked.id}: ${answer}`);
@@ -648,7 +677,7 @@ export async function answerTeamRun(runDir: string, answer: string, injectedProv
   if (worker) await recordRunEvent(state, worker, "received-answer", answer, { taskId: blocked.id, summary: `Received guidance for ${state.plan.tasks.find((task) => task.id === blocked.id)?.title ?? blocked.id}` });
   await saveState(state);
   const library = await readLibrary(state);
-  return advanceRun(state, injectedProviders ?? await defaultProviders(repo), `${library || "(empty)"}\n\nCurrent plan:\n${JSON.stringify(state.plan)}`, answer.trim(), blocked.id);
+  return advanceRun(state, providers, `${library || "(empty)"}\n\nCurrent plan:\n${JSON.stringify(state.plan)}`, answer.trim(), blocked.id);
 }
 
 export async function resumeTeamPreview(runDir: string, approvedCommand?: string, injectedProviders?: TeamProviders): Promise<TeamRunState> {

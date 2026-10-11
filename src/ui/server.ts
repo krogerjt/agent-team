@@ -9,6 +9,7 @@ import { roster, type PersonaId } from "../personas/roster.js";
 import { effectiveModel, isPersonaId, readPersona, updatePersona } from "../team/persona-store.js";
 import { loadState, readLibrary, repoHome, saveState, subscribeToRunEvents, type RunEvent, type TeamRunState } from "../team/state.js";
 import { answerTeamRun, chatTeamPersona, mergeTeamRun, messageTeamPersona, reviewTeamRun, runTeamGoal, resumeTeamPreview, startTeamPreview } from "../team/workflow.js";
+import { deleteTeamRun } from "../team/run-cleanup.js";
 import { getTimelineEntry, searchTimeline } from "../team/timeline.js";
 import { listSecrets, setSecret } from "../preview/secrets.js";
 import { livePreview, stopAllPreviews, stopPreview } from "../preview/runtime.js";
@@ -306,6 +307,10 @@ async function serve(req: IncomingMessage, res: ServerResponse, workspace: { rep
     const runDir = runPath(repo, runMatch[1]);
     const action = runMatch[2];
     if (method === "GET" && !action) { json(res, 200, await loadState(runDir)); return; }
+    if (method === "DELETE" && !action) {
+      if (activeRuns.has(runMatch[1]) || [...jobs.values()].some((job) => job.runId === runMatch[1] && job.status === "running")) throw new Error("This run is still working. Wait for it to stop, then discard it.");
+      json(res, 200, await gitAction(repo, () => deleteTeamRun(runDir))); return;
+    }
     if (method === "GET" && action === "review") { const review = await reviewTeamRun(runDir); json(res, 200, { ...review, readiness: await mergeReadiness(review.state) }); return; }
     if (method === "GET" && action === "events") {
       const requested = Number(url.searchParams.get("limit") ?? "200");
