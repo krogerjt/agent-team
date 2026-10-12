@@ -56,7 +56,7 @@ function item(id: string, title: string, ok: boolean, detail: string, remedy?: s
   return { id, title, status: ok ? "passed" : notOkStatus, detail: detail || (ok ? "ok" : "not detected"), ...(!ok && remedy ? { remedy } : {}) };
 }
 
-export interface ReadinessOptions { requiresXcodeGen?: boolean; usesCocoaPods?: boolean; usesBundler?: boolean; physicalDeviceWanted?: boolean }
+export interface ReadinessOptions { requiresXcodeGen?: boolean; usesCocoaPods?: boolean; usesBundler?: boolean; physicalDeviceWanted?: boolean; /** An App Store Connect API key is mapped, so Apple can sign in the cloud. */ cloudSigning?: boolean }
 
 /** Pure evaluation so every readiness rule is testable against fixture probe output. */
 export function evaluateIosReadiness(values: ReadinessValues, options: ReadinessOptions = {}): Finding[] {
@@ -78,8 +78,11 @@ export function evaluateIosReadiness(values: ReadinessValues, options: Readiness
   const distribution = identities.filter((name) => /Distribution/.test(name));
   const development = identities.filter((name) => /Development|Developer/.test(name));
   findings.push(item("keychain-access", "Build Keychain access", v.IDENTITIES !== undefined, v.IDENTITIES !== undefined ? "readable" : "", "Initialize and unlock the Agent Team Build Keychain (see README → Mac Build Host)."));
-  findings.push(item("signing-distribution", "Distribution signing identity", distribution.length > 0, distribution.length ? `${distribution.length} valid: ${distribution.join(", ")}` : "none in the Agent Team Build Keychain",
-    "Import an Apple Distribution certificate and its private key (.p12) into the Agent Team Build Keychain on the Mac. Signing is a separate permission from upload; neither is attempted until you grant it."));
+  findings.push(item("signing-distribution", "Distribution signing identity", distribution.length > 0, distribution.length ? `${distribution.length} valid: ${distribution.join(", ")}` : options.cloudSigning ? "none locally, which is fine: an App Store Connect API key is mapped, so Apple signs in the cloud during export" : "none in the Agent Team Build Keychain",
+    options.cloudSigning
+      ? "Nothing to do unless export reports a signing-identity or provisioning error. Cloud-managed signing needs an API key with ADMIN access (App Manager is not enough); otherwise import an Apple Distribution certificate and private key (.p12) into the Agent Team Build Keychain on the Mac."
+      : "Either map an App Store Connect API key with ADMIN access (npm run ios -- settings; Apple then signs in the cloud during export and no local certificate is needed), or import an Apple Distribution certificate and its private key (.p12) into the Agent Team Build Keychain on the Mac. Signing is a separate permission from upload; neither is attempted until you grant it.",
+    options.cloudSigning ? "pending" : "failed"));
   findings.push(item("signing-development", "Development signing identity", development.length > 0, development.length ? `${development.length} valid` : "none", "Import an Apple Development certificate into the build Keychain to install on a physical device.", "pending"));
   const profiles = Number(v.PROFILES ?? 0);
   findings.push(item("provisioning", "Provisioning profiles", profiles > 0, profiles ? `${profiles} installed` : "none installed", "Automatic signing can download profiles when an App Store Connect API key is configured; otherwise install an App Store profile on the Mac.", "pending"));
@@ -97,7 +100,7 @@ function baseFindings(base: RemoteReadiness): Finding[] {
 
 export interface IosReadinessDeps { run: RemoteScriptRunner; testHost?: typeof testRemoteBuildHost }
 
-export async function inspectIosReadiness(host: RemoteBuildHost, discovery: Pick<IosDiscovery, "needsXcodeGen" | "facts">, setupCommand: string, deps: IosReadinessDeps, physicalDeviceWanted = false): Promise<Report<ReadinessValues | undefined>> {
+export async function inspectIosReadiness(host: RemoteBuildHost, discovery: Pick<IosDiscovery, "needsXcodeGen" | "facts">, setupCommand: string, deps: IosReadinessDeps, physicalDeviceWanted = false, cloudSigning = false): Promise<Report<ReadinessValues | undefined>> {
   const title = "Mac build-host readiness";
   if (!host.enabled || !host.target) return buildReport<ReadinessValues | undefined>(title, [{ id: "host", title: "Mac Build Host", status: "blocked", detail: "No Mac Build Host is enabled.", remedy: "Open Workshop Options → Mac Build Host, save the SSH alias, test it, and enable it." }]);
   const needsXcodeGen = discovery.needsXcodeGen || Boolean(discovery.facts.xcodeGenSpec);
@@ -108,6 +111,6 @@ export async function inspectIosReadiness(host: RemoteBuildHost, discovery: Pick
   const probe = await deps.run(host, readinessProbeScript(), 45_000, 200_000);
   if (!probe.output.includes("MACOS")) return buildReport<ReadinessValues | undefined>(title, [...connection, { id: "probe", title: "Readiness probe", status: "blocked", detail: `The probe did not run (exit ${probe.code}).`, remedy: "Confirm the SSH user's shell can run /bin/zsh -s and that the Mac is awake." }]);
   const values = parseReadinessProbe(probe.output);
-  const findings = [...connection, ...evaluateIosReadiness(values, { requiresXcodeGen: needsXcodeGen, usesCocoaPods: discovery.facts.usesCocoaPods === true, usesBundler: discovery.facts.usesBundler === true, physicalDeviceWanted })];
+  const findings = [...connection, ...evaluateIosReadiness(values, { requiresXcodeGen: needsXcodeGen, usesCocoaPods: discovery.facts.usesCocoaPods === true, usesBundler: discovery.facts.usesBundler === true, physicalDeviceWanted, cloudSigning })];
   return buildReport<ReadinessValues | undefined>(title, findings, values);
 }

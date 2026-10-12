@@ -101,7 +101,7 @@ async function note(ctx: IosToolContext, step: StepId, report: Report<unknown>, 
 
 async function readiness(ctx: IosToolContext, discovery: IosDiscovery, physicalDeviceWanted = false) {
   const deps = await operationDeps(ctx);
-  return inspectIosReadiness(deps.host, discovery, deps.project.setupCommand, { run: ctx.run ?? sshScript }, physicalDeviceWanted);
+  return inspectIosReadiness(deps.host, discovery, deps.project.setupCommand, { run: ctx.run ?? sshScript }, physicalDeviceWanted, Boolean(deps.settings.apiKey));
 }
 
 async function recentRuns(ctx: IosToolContext, id?: string): Promise<ToolResult> {

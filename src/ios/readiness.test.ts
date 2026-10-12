@@ -36,6 +36,20 @@ test("old Xcode, missing tools, no signing and no device give exact fixes and co
   assert.equal(xcodeMajor("Xcode 26.1"), 26); assert.equal(xcodeMajor("nonsense"), undefined);
 });
 
+test("no local Distribution certificate is fine when an API key is mapped (cloud signing) and a failure when it is not", async () => {
+  const noIdentity = parseReadinessProbe(GOOD.replace(/IDENTITIES\t.*\n?/, "IDENTITIES\t\n"));
+  const withKey = byId(evaluateIosReadiness(noIdentity, { cloudSigning: true }))["signing-distribution"];
+  assert.equal(withKey.status, "pending"); assert.match(withKey.detail, /cloud/); assert.match(withKey.remedy!, /ADMIN/); assert.match(withKey.remedy!, /App Manager is not enough/);
+  const withoutKey = byId(evaluateIosReadiness(noIdentity, {}))["signing-distribution"];
+  assert.equal(withoutKey.status, "failed"); assert.match(withoutKey.remedy!, /ADMIN/); assert.match(withoutKey.remedy!, /\.p12/);
+  const present = byId(evaluateIosReadiness(parseReadinessProbe(GOOD), { cloudSigning: true }))["signing-distribution"];
+  assert.equal(present.status, "passed");
+  const base = async () => ({ ok: true, target: "build-mac", items: [{ name: "SSH connection", ok: true, detail: "x" }, { name: "Agent Team Build Keychain", ok: true, detail: "x" }] });
+  const run = async () => ({ code: 0, output: GOOD.replace(/IDENTITIES\t.*\n?/, "IDENTITIES\t\n") });
+  const report = await inspectIosReadiness(host, { needsXcodeGen: false, facts: {} }, "", { run, testHost: base as never }, false, true);
+  assert.equal(report.ok, true, report.text); assert.equal(report.counts.failed, 0);
+});
+
 test("XcodeGen is only demanded when the project needs it", () => {
   const f = byId(evaluateIosReadiness(parseReadinessProbe(GOOD)));
   assert.equal(f.xcodegen, undefined);
