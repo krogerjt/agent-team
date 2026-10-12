@@ -1,9 +1,8 @@
 import { discoverIosProject } from "./discovery.js";
 
 /**
- * When the host hands a finished run to Hollis for release readiness.
- * Both conditions must hold: the repository is an iOS app, and the goal is about releasing it.
- * Deliberately conservative: a goal such as "add a release notes screen" must not trigger a release stage.
+ * Whether a run is an iOS release: the repository is an iOS app and the goal is about releasing it. Marlow sees this,
+ * and such runs end with shipping notes. Deliberately conservative: "add a release notes screen" is not a release.
  */
 const RELEASE_PHRASES: RegExp[] = [
   /\bapp\s*-?\s*store\b/i,
@@ -27,13 +26,4 @@ export async function isIosApp(root: string): Promise<boolean> {
     const target = discovery.appTarget;
     return Boolean(target) && (target!.platform === undefined || target!.platform === "iOS");
   } catch { return false; }
-}
-
-/** AGENT_TEAM_RELEASE_STAGE=off turns the automatic hand-off off. */
-export function releaseStageEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return (env.AGENT_TEAM_RELEASE_STAGE ?? "").trim().toLowerCase() !== "off";
-}
-
-export async function shouldRunReleaseStage(goal: string, root: string, env: NodeJS.ProcessEnv = process.env): Promise<boolean> {
-  return releaseStageEnabled(env) && goalMentionsRelease(goal) && await isIosApp(root);
 }

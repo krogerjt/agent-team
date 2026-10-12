@@ -1,10 +1,10 @@
 import type { ModelProvider, ToolCapableProvider } from "../core/provider.js";
 import { requireToolProvider } from "../core/provider.js";
 import { runChecks, type CheckResult } from "../coding/checks.js";
-import { createBranchWorktree, diff, git, resolveCleanRepo } from "../coding/git.js";
+import { createBranchWorktree, diff, git, resolveCleanRepo, type Worktree } from "../coding/git.js";
 import { WorkspaceTools } from "../coding/workspace-tools.js";
-import { roster, type PersonaId, type WorkerId } from "../personas/roster.js";
-import { MAX_TASK_TITLE, orderedTasks, parsePlan, type TeamTask } from "./plan.js";
+import { capabilityList, roster, WORKER_IDS, WRITING_WORKERS, type PersonaId } from "../personas/roster.js";
+import { MAX_PLAN_TASKS, MAX_TASK_TITLE, parsePlan, type TeamTask } from "./plan.js";
 import { appendLibrary, createRunState, loadState, logEvent, readLibrary, repoHome, saveState, type ReleaseStageState, type TaskState, type TeamRunState } from "./state.js";
 import { appendChat, configuredProvider, effectiveModel, personaContext, readPersona } from "./persona-store.js";
 import { readToolLoopDiagnostics, trackedGenerate, trackedGenerateWithTools } from "./telemetry.js";
@@ -16,9 +16,11 @@ import { livePreview, startPreview, stopPreview, PreviewFailure, PreviewPause, P
 import { inspectPreview, runBrowserSteps, screenshotData, type BrowserStep } from "../preview/browser.js";
 import { buildEnvironmentTools, executeBuildEnvironmentTool } from "./environment-tools.js";
 import { createHollisSession } from "../ios/hollis-session.js";
-import { shouldRunReleaseStage } from "../ios/release-trigger.js";
-import { maxParallelTasks, toolLoopLimits } from "../config.js";
+import { goalMentionsRelease, isIosApp } from "../ios/release-trigger.js";
+import { redactSecrets } from "../ios/redact.js";
+import { maxDecisions, toolLoopLimits } from "../config.js";
 import { serialize } from "./serial.js";
+import { initDirector, runDirector } from "./director.js";
 
 /** Hollis (iOS release engineer) is optional so existing provider sets stay valid. */
 export type TeamProviders = Record<Exclude<PersonaId, "hollis">, ModelProvider> & { hollis?: ModelProvider };
@@ -35,7 +37,7 @@ async function generateFor(state: TeamRunState, persona: PersonaId, provider: Mo
   return trackedGenerate(state.repo, persona, await effectiveModel(state.repo, persona), provider, request);
 }
 
-async function generateToolsFor(state: TeamRunState, persona: PersonaId, provider: ToolCapableProvider, request: Parameters<ToolCapableProvider["generateWithTools"]>[0], journalWork = true) {
+export async function generateToolsFor(state: TeamRunState, persona: PersonaId, provider: ToolCapableProvider, request: Parameters<ToolCapableProvider["generateWithTools"]>[0], journalWork = true) {
   try {
     return await trackedGenerateWithTools(state.repo, persona, await effectiveModel(state.repo, persona), provider, request);
   } catch (error) {
@@ -51,16 +53,16 @@ async function generateToolsFor(state: TeamRunState, persona: PersonaId, provide
   }
 }
 
-async function defaultProviders(repo: string): Promise<TeamProviders> {
+export async function defaultProviders(repo: string): Promise<TeamProviders> {
   const entries = await Promise.all((Object.keys(roster) as PersonaId[]).map(async (id) => [id, await configuredProvider(repo, id)] as const));
   return Object.fromEntries(entries) as TeamProviders;
 }
 
-function checksText(checks: CheckResult[]): string {
+export function checksText(checks: CheckResult[]): string {
   return checks.map((check) => `${check.name}: ${check.status}\n${check.output.slice(-3_000)}`).join("\n\n");
 }
 
-async function recordRunEvent(
+export async function recordRunEvent(
   state: TeamRunState, persona: PersonaId, event: string, detail: string,
   options: { summary?: string; taskId?: string; files?: string[] } = {},
 ): Promise<void> {
@@ -77,7 +79,7 @@ async function recordRunEvent(
   });
 }
 
-async function askWithTools(
+export async function askWithTools(
   state: TeamRunState, persona: PersonaId, provider: ToolCapableProvider,
   prompt: string, tools: WorkspaceTools, journalWork = true, taskId?: string, hollisMode?: "full" | "readiness",
 ): Promise<string> {
@@ -120,174 +122,176 @@ async function askWithTools(
   return response.text.trim();
 }
 
-async function evaluateTask(
-  state: TeamRunState, task: TeamTask, workerPath: string, changes: string,
-  checks: CheckResult[], providers: TeamProviders, library: string,
-): Promise<{ review: string; qa: string }> {
-  const reviewer: PersonaId = task.worker === "rowan" ? "marlow" : "rowan";
-  const context = `Goal: ${state.goal}\nTask: ${task.title}\nShared library:\n${library || "(empty)"}\nDiff:\n${changes.slice(0, 24_000)}\nChecks:\n${checksText(checks)}`;
-  const review = await askWithTools(state, reviewer, requireToolProvider(providers[reviewer]),
-    `${context}\nReview this worker's changes. Begin with APPROVED: or CHANGES_NEEDED: and give concrete reasons. Do not edit files.`,
-    new WorkspaceTools(workerPath, "researcher"), true, task.id);
-  const qa = await askWithTools(state, "tove", requireToolProvider(providers.tove),
-    `${context}\nCheck task acceptance and verification. Begin with PASS: or ISSUES: and distinguish what checks actually verified. Do not edit files.`,
-    new WorkspaceTools(workerPath, "researcher"), true, task.id);
-  return { review, qa };
+/** The provider for a persona, or a plain error Marlow can act on when none is configured. */
+export function providerFor(providers: TeamProviders, persona: PersonaId): ToolCapableProvider {
+  const provider = providers[persona as keyof TeamProviders];
+  if (!provider) throw new Error(`${roster[persona].name} has no model provider configured (set ${persona.toUpperCase()}_PROVIDER and ${persona.toUpperCase()}_MODEL).`);
+  return requireToolProvider(provider);
 }
 
-function needsRepair(review: string, qa: string, checks: CheckResult[]): boolean {
-  return checks.some((check) => check.status === "failed" || check.required && check.status === "missing") ||
-    !/^APPROVED:/i.test(review.trim()) || !/^PASS:/i.test(qa.trim());
+export function planTask(state: TeamRunState, taskId: string): TeamTask {
+  const task = state.plan?.tasks.find((item) => item.id === taskId);
+  if (!task) throw new Error(`There is no task "${taskId}".`);
+  return task;
 }
 
-/** The worker who owns the task reconciles a conflicted merge in place; true only if no markers remain and the merge committed. */
-async function resolveMergeConflicts(
-  state: TeamRunState, task: TeamTask, cwd: string, files: string[],
-  worker: ToolCapableProvider, tools: WorkspaceTools, identity: string[],
-): Promise<boolean> {
-  if (!files.length) return false;
-  await recordRunEvent(state, task.worker, "conflict", files.join(", "), { taskId: task.id, summary: `Reconciling merge conflicts for ${task.title}` });
-  try {
-    await askWithTools(state, task.worker, worker,
-      `Goal: ${state.goal}\nYour task "${task.title}" is mid-merge with work that parallel tasks already landed, and these files contain git conflict markers: ${files.join(", ")}.\nOpen each file, keep BOTH sides' intent (your task's changes plus the already-merged work), and remove every <<<<<<<, =======, >>>>>>> marker using apply_patch. Do not drop the other tasks' changes. Do not run git commands.`,
-      tools, true, task.id);
-    for (const file of files) {
-      const text = await readFile(path.join(cwd, file), "utf8").catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? "" : undefined);
-      if (text === undefined || /^(<{7}|>{7})( |$)/m.test(text)) return false;
-    }
-    await git(cwd, ["add", "-A"]);
-    await git(cwd, [...identity, "commit", "--no-edit"]);
-    await recordRunEvent(state, task.worker, "conflict-resolved", files.join(", "), { taskId: task.id, summary: `Resolved merge conflicts for ${task.title}` });
-    return true;
-  } catch (error) {
-    await logEvent(state, task.worker, "conflict-unresolved", error instanceof Error ? error.message : String(error));
-    return false;
-  }
+export function taskStateOf(state: TeamRunState, taskId: string): TaskState {
+  let taskState = state.tasks.find((item) => item.id === taskId);
+  if (!taskState) { taskState = { id: taskId, status: "todo" }; state.tasks.push(taskState); }
+  return taskState;
 }
 
-const MAX_TRIAGE_ATTEMPTS = 2;
-
-/** Reads Marlow's escalation (SUMMARY / OPTIONS / RECOMMENDED); anything unstructured becomes the summary. */
-export function parseEscalation(reply: string): NonNullable<TaskState["triageNote"]> {
-  const text = reply.replace(/^\s*ESCALATE:\s*/i, "").trim();
-  const sections: Record<string, string> = {};
-  let current: string | undefined;
-  for (const line of text.split("\n")) {
-    const heading = /^\s*(SUMMARY|OPTIONS|RECOMMENDED):\s*(.*)$/i.exec(line);
-    if (heading) { current = heading[1].toUpperCase(); sections[current] = heading[2]; }
-    else if (current) sections[current] += `\n${line}`;
-  }
-  const options = (sections.OPTIONS ?? "").split("\n").map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim()).filter(Boolean).slice(0, 4);
-  return { summary: (sections.SUMMARY?.trim() || text).slice(0, 1_200), options, recommended: sections.RECOMMENDED?.trim().slice(0, 500) || undefined };
+/** Checks that failed, or required checks that could not run. */
+export function failingChecks(checks?: CheckResult[]): CheckResult[] {
+  return (checks ?? []).filter((check) => check.status === "failed" || check.required && check.status === "missing");
 }
 
-/** Before a blocked task reaches the human, Marlow (the lead) gets to answer it. Returns guidance to retry with, or undefined to escalate. */
-async function triageBlock(state: TeamRunState, task: TeamTask, taskState: TaskState, providers: TeamProviders, library: string): Promise<string | undefined> {
-  const attempts = taskState.triageAttempts ?? 0;
-  const error = taskState.error ?? "";
-  // Host setup (Mac, Xcode, Keychain) is something only the human can change.
-  if (attempts >= MAX_TRIAGE_ATTEMPTS || /needs environment setup/.test(error)) return undefined;
-  taskState.triageAttempts = attempts + 1;
+export function checksLine(checks?: CheckResult[]): string {
+  return checks?.length ? checks.map((check) => `${check.name} ${check.status}${check.required && check.status === "missing" ? " (required)" : ""}`).join(", ") : "none run";
+}
+
+function countFailure(taskState: TaskState, persona: PersonaId): void {
+  taskState.failures ??= {};
+  taskState.failures[persona] = (taskState.failures[persona] ?? 0) + 1;
+}
+
+async function ensureWorktree(state: TeamRunState, task: TeamTask, taskState: TaskState): Promise<Worktree> {
+  if (taskState.worktree) return taskState.worktree;
+  const worktree = await createBranchWorktree(state.repo, `codex/${task.worker}-${state.id}-${task.id}`, state.staging!.branch);
+  taskState.worktree = worktree;
+  await recordRunEvent(state, task.worker, "worktree", worktree.path, { taskId: task.id, summary: `Opened a worktree for ${task.title}` });
   await saveState(state);
-  try {
-    const reply = await askWithTools(state, "marlow", requireToolProvider(providers.marlow),
-      `A teammate is blocked and the human has not been asked yet. You are the lead: decide yourself whenever the goal, the plan and the repository let you.\nGoal: ${state.goal}\nTask: ${task.title} (worker: ${roster[task.worker].name})\nPlan: ${JSON.stringify(state.plan?.tasks)}\nShared library:\n${library || "(empty)"}\nWhy it is blocked:\n${error.slice(0, 6_000)}\nAttempt ${attempts + 1} of ${MAX_TRIAGE_ATTEMPTS}. Inspect the worktree if useful; do not edit files.\nReply with exactly one of:\nGUIDANCE: <concrete direction the worker will receive, such as how to answer its question, how to combine overlapping work, or what to fix after review>\nor, only for something a human must decide (credentials, a product preference nothing implies, machine setup), this exact layout, written for a busy non-technical person with no jargon, file names or code terms:\nESCALATE:\nSUMMARY: <two or three plain sentences: what is going on and why it needs them>\nOPTIONS:\n- <a short answer they could send, written as an instruction>\n- <another>\nRECOMMENDED: <which option you would pick and why, in one sentence>`,
-      new WorkspaceTools(taskState.worktree?.path ?? state.staging!.path, "researcher"), true, task.id);
-    const guidance = /^GUIDANCE:\s*([\s\S]+)/i.exec(reply.trim())?.[1].trim();
-    if (guidance) {
-      state.decisions ??= [];
-      state.decisions.push({ taskId: task.id, answer: `Marlow: ${guidance}`, at: new Date().toISOString() });
-      await recordRunEvent(state, "marlow", "triage", guidance, { taskId: task.id, summary: `Marlow unblocked ${task.title} without asking the human` });
-      (taskState.triageLog ??= []).push({ guidance, at: new Date().toISOString() });
-      await saveState(state);
-      return `(from Marlow, the lead) ${guidance}`;
-    }
-    taskState.triageNote = parseEscalation(reply);
-  } catch {
-    taskState.triageNote = { summary: "Marlow could not look at this one, so it came straight to you. The technical details are below.", options: [] };
-  }
-  return undefined;
+  return worktree;
 }
 
-async function executeTask(
-  state: TeamRunState, task: TeamTask, taskState: TaskState,
-  providers: TeamProviders, library: string, answer?: string,
-): Promise<boolean> {
-  const staging = state.staging!;
+/** What review, QA and checks said last time, for a worker who is sent back or takes a task over. */
+function previousFindings(taskState: TaskState): string {
+  const parts = [
+    taskState.review ? `Last review${taskState.reviewer ? ` (${taskState.reviewer})` : ""}:\n${taskState.review.slice(0, 4_000)}` : "",
+    taskState.qa ? `Last QA:\n${taskState.qa.slice(0, 4_000)}` : "",
+    taskState.checks?.length ? `Last checks:\n${checksText(taskState.checks).slice(0, 4_000)}` : "",
+    taskState.error ? `Last attempt ended with: ${taskState.error.slice(0, 2_000)}` : "",
+  ].filter(Boolean);
+  return parts.length ? `${parts.join("\n")}\n` : "";
+}
+
+/** A read-only question to any teammate (Juniper by default). With a task, the answer becomes that task's brief. */
+export async function researchStep(state: TeamRunState, providers: TeamProviders, library: string, persona: PersonaId, question: string, taskId?: string): Promise<string> {
+  const task = taskId ? planTask(state, taskId) : undefined;
+  const taskState = taskId ? taskStateOf(state, taskId) : undefined;
+  const answer = await askWithTools(state, persona, providerFor(providers, persona),
+    `Goal: ${state.goal}\n${task ? `Task: ${task.title} (worker: ${roster[task.worker].name})\n` : ""}Shared library:\n${library || "(empty)"}\nMarlow, the lead, asks: ${question}\nInspect what you need and answer concisely${task ? ` as an implementation brief for ${roster[task.worker].name}` : ""}. Say what you verified and what you are assuming. Do not edit files.`,
+    new WorkspaceTools(taskState?.worktree?.path ?? state.staging!.path, "researcher"), true, taskId, "readiness");
+  if (taskState) {
+    taskState.research = taskState.research ? `${taskState.research}\n\n${roster[persona].name}: ${answer}` : answer;
+    await saveState(state);
+  }
+  return answer;
+}
+
+/**
+ * The task's worker does (or continues) the task in its own worktree, then the host runs checks on any changes.
+ * Failures count against the worker and are thrown for Marlow to decide on; the task waits in "review" either way.
+ */
+export async function workStep(state: TeamRunState, providers: TeamProviders, library: string, taskId: string, guidance?: string): Promise<string> {
+  const task = planTask(state, taskId);
+  const taskState = taskStateOf(state, taskId);
+  const persona = task.worker;
+  const previous = guidance ? previousFindings(taskState) : "";
   taskState.status = "doing";
   taskState.error = undefined;
   taskState.triageNote = undefined;
   await saveState(state);
-  let worktree = taskState.worktree;
-  if (!worktree) {
-    const branch = `codex/${task.worker}-${state.id}-${task.id}`;
-    worktree = await createBranchWorktree(state.repo, branch, staging.branch);
-    taskState.worktree = worktree;
-    await recordRunEvent(state, task.worker, "worktree", worktree.path, { taskId: task.id, summary: `Opened a worktree for ${task.title}` });
-    await saveState(state);
-  }
-
-  let research = taskState.research;
-  if (!research) {
-    research = await askWithTools(state, "juniper", requireToolProvider(providers.juniper),
-      `Goal: ${state.goal}\nAssigned task: ${task.title}\nShared library:\n${library || "(empty)"}\nInspect the relevant repository files and report a concise implementation brief for ${roster[task.worker].name}.`,
-      new WorkspaceTools(worktree.path, "researcher"), true, task.id);
-    taskState.research = research;
-    await saveState(state);
-  }
-
-  const worker = requireToolProvider(providers[task.worker]);
-  const tools = new WorkspaceTools(worktree.path, "lead");
-  const workerResponse = await askWithTools(state, task.worker, worker,
-    `Goal: ${state.goal}\nAssigned task: ${task.title}\nOther tasks and dependencies: ${JSON.stringify(state.plan?.tasks)}\nJuniper's brief:\n${research}\nShared library:\n${library || "(empty)"}\n${answer ? `Human answer or guidance: ${answer}\nInspect your existing worktree changes and continue this task.\n` : ""}Tasks that do not depend on yours may be running at the same time in their own worktrees, so stay strictly inside this task's scope and avoid unrelated edits or reformatting. Implement only this task now, using apply_patch for changes. If a decision is required before proceeding, begin your response with NEEDS_INPUT: and state the exact question.`, tools, true, task.id);
-  if (/^NEEDS_INPUT:/i.test(workerResponse)) throw new Error(workerResponse);
-  let changes = await diff(worktree.path);
-  if (!changes) throw new Error(`${roster[task.worker].name} made no changes for ${task.id}.`);
-  let checks = await runChecks(worktree.path, { repo: state.repo, runDir: state.runDir, taskId: task.id });
-  taskState.status = "review";
-  taskState.checks = checks;
-  await recordRunEvent(state, task.worker, "checks", checksText(checks), { taskId: task.id, summary: `Checked ${task.title}: ${checks.map((check) => `${check.name} ${check.status}`).join(", ")}` });
-  await saveState(state);
-  const unavailable = checks.find((check) => check.required && check.status === "missing");
-  if (unavailable) {
-    taskState.status = "blocked";
-    taskState.error = `${unavailable.name} needs environment setup. Open Workshop Options → Mac Build Host. ${unavailable.output}`;
-    try {
-      const diagnosis = await askWithTools(state, "piper", requireToolProvider(providers.piper),
-        `The host could not run required checks for ${task.title}. Diagnose the environment using inspect_build_environment and repository files. Checks:\n${checksText(checks)}\nGive concrete setup steps and identify whether the problem is Mac connectivity, Xcode, simulator, Keychain or repository preparation. Do not edit application code or request secret values. Readiness alone does not verify a build.`,
-        new WorkspaceTools(worktree.path, "researcher"), false, task.id);
-      taskState.error += `\n\nPiper: ${diagnosis}`;
-      await recordRunEvent(state, "piper", "environment-blocked", diagnosis, { taskId: task.id, summary: `Diagnosed build environment for ${task.title}` });
-    } catch (error) {
-      taskState.error += `\nPiper's environment diagnosis was unavailable: ${error instanceof Error ? error.message : String(error)}`;
+  try {
+    const worktree = await ensureWorktree(state, task, taskState);
+    if (task.research && !taskState.research) await researchStep(state, providers, library, "juniper", `Write a concise implementation brief for "${task.title}".`, task.id);
+    const writes = WRITING_WORKERS.includes(persona);
+    const reply = await askWithTools(state, persona, providerFor(providers, persona),
+      `Goal: ${state.goal}\nAssigned task: ${task.title}\nOther tasks and dependencies: ${JSON.stringify(state.plan?.tasks)}\n${taskState.research ? `Research brief:\n${taskState.research}\n` : ""}Shared library:\n${library || "(empty)"}\n${guidance ? `Guidance from Marlow, the lead: ${guidance}\n${previous}Inspect your existing worktree changes and continue this task.\n` : ""}${writes
+        ? "Tasks that do not depend on yours may be running at the same time in their own worktrees, so stay strictly inside this task's scope and avoid unrelated edits or reformatting. Implement only this task now, using apply_patch for changes."
+        : "You cannot edit files in this session. Do the task with your own tools and report exactly what you verified, with evidence, and what you found."} If the task needs a tool you do not have, or a decision before you can proceed, begin your response with NEEDS_INPUT: and say exactly what is missing, so Marlow can reassign it or decide.`,
+      new WorkspaceTools(worktree.path, writes ? "lead" : "researcher"), true, task.id, "readiness");
+    taskState.notes = reply.slice(0, 6_000);
+    if (/^NEEDS_INPUT:/i.test(reply)) throw new Error(reply);
+    const changes = await diff(worktree.path);
+    taskState.hasChanges = Boolean(changes);
+    taskState.review = undefined;
+    taskState.reviewer = undefined;
+    taskState.qa = undefined;
+    taskState.checks = undefined;
+    if (!changes && writes) throw new Error(`${roster[persona].name} made no changes for ${task.id}.`);
+    if (changes) {
+      const checks = await runChecks(worktree.path, { repo: state.repo, runDir: state.runDir, taskId: task.id });
+      taskState.checks = checks;
+      await recordRunEvent(state, persona, "checks", checksText(checks), { taskId: task.id, summary: `Checked ${task.title}: ${checksLine(checks)}` });
+      if (failingChecks(checks).length) countFailure(taskState, persona);
     }
+    taskState.status = "review";
     await saveState(state);
-    return false;
+    return `${roster[persona].name} finished "${task.title}".\nTheir reply: ${reply.slice(0, 2_000)}\n${changes ? `Diff (${changes.length} characters):\n${changes.slice(0, 6_000)}\nChecks:\n${checksText(taskState.checks ?? []).slice(0, 3_000) || "none detected"}` : "No file changes."}`;
+  } catch (error) {
+    taskState.status = "review";
+    taskState.error = error instanceof Error ? error.message : String(error);
+    countFailure(taskState, persona);
+    await saveState(state);
+    throw error;
   }
-  let { review, qa } = await evaluateTask(state, task, worktree.path, changes, checks, providers, library);
+}
 
-  if (needsRepair(review, qa, checks)) {
-    await recordRunEvent(state, task.worker, "repair", `${review.slice(0, 500)} | ${qa.slice(0, 500)}`, { taskId: task.id, summary: `Repairing ${task.title} after review` });
-    await askWithTools(state, task.worker, worker,
-      `This is the single repair pass for task ${task.title}. Address the review and QA findings with focused patches.\nReview:\n${review}\nQA:\n${qa}\nChecks:\n${checksText(checks)}\nDiff:\n${changes.slice(0, 24_000)}`, tools, true, task.id);
-    changes = await diff(worktree.path);
-    checks = await runChecks(worktree.path, { repo: state.repo, runDir: state.runDir, taskId: `${task.id}-repair` });
-    ({ review, qa } = await evaluateTask(state, task, worktree.path, changes, checks, providers, library));
-  }
+function verdictContext(state: TeamRunState, task: TeamTask, taskState: TaskState, changes: string, library: string): string {
+  return `Goal: ${state.goal}\nTask: ${task.title} (done by ${roster[task.worker].name})\nShared library:\n${library || "(empty)"}\nDiff:\n${changes.slice(0, 24_000) || "(no file changes)"}\nChecks:\n${checksText(taskState.checks ?? []) || "none run"}\nWorker's report:\n${taskState.notes?.slice(0, 3_000) ?? "(none)"}`;
+}
+
+/** A teammate other than the worker reviews the task's changes. A rejection counts against the worker. */
+export async function reviewStep(state: TeamRunState, providers: TeamProviders, library: string, taskId: string, reviewer: PersonaId): Promise<string> {
+  const task = planTask(state, taskId);
+  const taskState = taskStateOf(state, taskId);
+  const changes = taskState.worktree ? await diff(taskState.worktree.path) : "";
+  const review = await askWithTools(state, reviewer, providerFor(providers, reviewer),
+    `${verdictContext(state, task, taskState, changes, library)}\nReview this worker's changes. Begin with APPROVED: or CHANGES_NEEDED: and give concrete reasons. Do not edit files.`,
+    new WorkspaceTools(taskState.worktree?.path ?? state.staging!.path, "researcher"), true, task.id, "readiness");
   taskState.review = review;
-  taskState.qa = qa;
-  taskState.checks = checks;
+  taskState.reviewer = roster[reviewer].name;
+  if (!/^APPROVED:/i.test(review.trim())) countFailure(taskState, task.worker);
   await saveState(state);
-  if (needsRepair(review, qa, checks)) {
-    taskState.status = "blocked";
-    taskState.error = "Checks, review, or QA still need attention after one repair pass.";
-    await saveState(state);
-    return false;
-  }
+  return `${roster[reviewer].name} reviewed "${task.title}":\n${review.slice(0, 4_000)}`;
+}
 
+/** QA (Tove by default) checks the task against its goal. Issues count against the worker. */
+export async function qaStep(state: TeamRunState, providers: TeamProviders, library: string, taskId: string, persona: PersonaId): Promise<string> {
+  const task = planTask(state, taskId);
+  const taskState = taskStateOf(state, taskId);
+  const changes = taskState.worktree ? await diff(taskState.worktree.path) : "";
+  const qa = await askWithTools(state, persona, providerFor(providers, persona),
+    `${verdictContext(state, task, taskState, changes, library)}\nCheck task acceptance and verification. Begin with PASS: or ISSUES: and distinguish what checks actually verified. Do not edit files.`,
+    new WorkspaceTools(taskState.worktree?.path ?? state.staging!.path, "researcher"), true, task.id, "readiness");
+  taskState.qa = qa;
+  if (!/^PASS:/i.test(qa.trim())) countFailure(taskState, task.worker);
+  await saveState(state);
+  return `${roster[persona].name} checked "${task.title}":\n${qa.slice(0, 4_000)}`;
+}
+
+/**
+ * Merge the task into the run's staging branch (never the human's checkout), one task at a time so staging only
+ * advances by fast-forward. Work landed by parallel tasks is folded in first and the combined code re-checked;
+ * combined failures stop the merge unless Marlow accepted failing checks for this task.
+ */
+export async function integrateStep(state: TeamRunState, providers: TeamProviders, taskId: string, acceptFailingChecks: boolean): Promise<string> {
+  const task = planTask(state, taskId);
+  const taskState = taskStateOf(state, taskId);
+  const staging = state.staging!;
+  const worktree = taskState.worktree;
+  if (!worktree || !await diff(worktree.path)) {
+    taskState.status = "done";
+    await recordRunEvent(state, task.worker, "integrated", "No file changes to merge.", { taskId: task.id, summary: `Completed ${task.title} (nothing to merge)` });
+    await saveState(state);
+    return `"${task.title}" is done. It had no file changes, so nothing was merged.`;
+  }
+  const resolver: PersonaId = WRITING_WORKERS.includes(task.worker) ? task.worker : "kit";
+  const tools = new WorkspaceTools(worktree.path, "lead");
+  let checks = taskState.checks ?? [];
   const identity = ["-c", `user.name=Agent Team ${roster[task.worker].name}`, "-c", "user.email=agent-team@localhost.invalid"];
-  // One task integrates at a time so staging only ever advances by fast-forward.
-  const integrated = await serialize(`integrate:${state.id}`, async () => {
+  const combined = await serialize(`integrate:${state.id}`, async () => {
     await git(worktree.path, ["add", "-A"]);
     await git(worktree.path, [...identity, "commit", "-m", `${roster[task.worker].name}: ${task.title}`]);
     const taskCommit = await git(worktree.path, ["rev-parse", "HEAD"]);
@@ -299,15 +303,15 @@ async function executeTask(
       try { await git(worktree.path, [...identity, "merge", "--no-edit", staging.branch]); }
       catch (error) {
         const conflicted = (await git(worktree.path, ["diff", "--name-only", "--diff-filter=U"]).catch(() => "")).split("\n").filter(Boolean);
-        if (!await resolveMergeConflicts(state, task, worktree.path, conflicted, worker, tools, identity)) {
+        if (!await resolveMergeConflicts(state, task, resolver, worktree.path, conflicted, providerFor(providers, resolver), tools, identity)) {
           await git(worktree.path, ["merge", "--abort"]).catch(() => undefined);
           await uncommit();
-          throw new Error(`${task.title} conflicts with work already merged from parallel tasks (${conflicted.join(", ") || "no conflict files reported"}), and ${roster[task.worker].name} could not reconcile it. ${error instanceof Error ? error.message : String(error)}`);
+          throw new Error(`${task.title} conflicts with work already merged from parallel tasks (${conflicted.join(", ") || "no conflict files reported"}), and ${roster[resolver].name} could not reconcile it. ${error instanceof Error ? error.message : String(error)}`);
         }
       }
       checks = await runChecks(worktree.path, { repo: state.repo, runDir: state.runDir, taskId: `${task.id}-merged` });
       taskState.checks = checks;
-      if (checks.some((check) => check.status === "failed" || check.required && check.status === "missing")) {
+      if (failingChecks(checks).length && !acceptFailingChecks) {
         await uncommit();
         throw new Error(`Checks failed after combining ${task.title} with parallel tasks.\n${checksText(checks)}`);
       }
@@ -316,53 +320,67 @@ async function executeTask(
     return !upToDate;
   });
   taskState.status = "done";
-  await recordRunEvent(state, task.worker, "integrated", `${staging.branch}${integrated ? " (combined with parallel tasks)" : ""}; checks: ${checks.map((check) => `${check.name} ${check.status}`).join(", ") || "none"}`, { taskId: task.id, summary: `Completed ${task.title}` });
+  taskState.error = undefined;
+  await recordRunEvent(state, task.worker, "integrated", `${staging.branch}${combined ? " (combined with parallel tasks)" : ""}; checks: ${checksLine(checks)}`, { taskId: task.id, summary: `Completed ${task.title}` });
   await saveState(state);
-  return true;
+  return `"${task.title}" is merged into the run's staging branch${combined ? " (combined with work from parallel tasks)" : ""}. Checks: ${checksLine(checks)}.`;
 }
 
-async function advanceRun(state: TeamRunState, providers: TeamProviders, library: string, answer?: string, answerTaskId?: string): Promise<TeamRunState> {
-  state.status = "doing";
-  await saveState(state);
-  const ordered = orderedTasks(state.plan!);
-  const limit = maxParallelTasks();
-  const running = new Map<string, Promise<void>>();
-  const isBlocked = () => state.status === "blocked";
-  const isDone = (id: string) => state.tasks.find((item) => item.id === id)?.status === "done";
-  const run = async (task: TeamTask): Promise<void> => {
-    const taskState = state.tasks.find((item) => item.id === task.id)!;
-    let guidance = taskState.status === "blocked" && (!answerTaskId || answerTaskId === task.id) ? answer : undefined;
-    if (guidance) taskState.triageAttempts = 0;
-    for (;;) {
-      try {
-        if (await executeTask(state, task, taskState, providers, library, guidance)) return;
-      } catch (error) {
-        taskState.status = "blocked";
-        taskState.error = error instanceof Error ? error.message : String(error);
-      }
-      guidance = await triageBlock(state, task, taskState, providers, library);
-      if (!guidance) break;
+/** The task's worker (or Kit, for a read-only worker) reconciles a conflicted merge in place; true only if no markers remain and the merge committed. */
+async function resolveMergeConflicts(
+  state: TeamRunState, task: TeamTask, persona: PersonaId, cwd: string, files: string[],
+  worker: ToolCapableProvider, tools: WorkspaceTools, identity: string[],
+): Promise<boolean> {
+  if (!files.length) return false;
+  await recordRunEvent(state, persona, "conflict", files.join(", "), { taskId: task.id, summary: `Reconciling merge conflicts for ${task.title}` });
+  try {
+    await askWithTools(state, persona, worker,
+      `Goal: ${state.goal}\nYour task "${task.title}" is mid-merge with work that parallel tasks already landed, and these files contain git conflict markers: ${files.join(", ")}.\nOpen each file, keep BOTH sides' intent (your task's changes plus the already-merged work), and remove every <<<<<<<, =======, >>>>>>> marker using apply_patch. Do not drop the other tasks' changes. Do not run git commands.`,
+      tools, true, task.id);
+    for (const file of files) {
+      const text = await readFile(path.join(cwd, file), "utf8").catch((error: NodeJS.ErrnoException) => error.code === "ENOENT" ? "" : undefined);
+      if (text === undefined || /^(<{7}|>{7})( |$)/m.test(text)) return false;
     }
-    state.status = "blocked";
-    await recordRunEvent(state, task.worker, "error", taskState.error ?? "Blocked.", { taskId: task.id, summary: `Blocked on ${task.title}` });
-  };
-  // Start every task whose dependencies are done, up to the limit. Once anything blocks, let running tasks
-  // finish but start nothing new, matching the old stop-on-first-block behavior.
-  for (;;) {
-    if (!isBlocked()) {
-      for (const task of ordered) {
-        if (running.size >= limit) break;
-        if (running.has(task.id) || isDone(task.id) || !task.dependsOn.every(isDone)) continue;
-        const started = run(task).finally(() => running.delete(task.id));
-        running.set(task.id, started);
-      }
-    }
-    if (!running.size) break;
-    await Promise.race(running.values());
+    await git(cwd, ["add", "-A"]);
+    await git(cwd, [...identity, "commit", "--no-edit"]);
+    await recordRunEvent(state, persona, "conflict-resolved", files.join(", "), { taskId: task.id, summary: `Resolved merge conflicts for ${task.title}` });
+    return true;
+  } catch (error) {
+    await logEvent(state, persona, "conflict-unresolved", error instanceof Error ? error.message : String(error));
+    return false;
   }
-  if (!isBlocked()) return finishRun(state, providers, library);
-  await saveState(state);
-  return state;
+}
+
+/**
+ * Piper starts the staged preview; with visual review, Wren then checks the interface in a browser.
+ * needsHuman is true when Piper is waiting on the human (a command to approve, a secret, a stopped preview).
+ */
+export async function previewStep(state: TeamRunState, providers: TeamProviders, visual: boolean): Promise<{ text: string; needsHuman: boolean }> {
+  // Restart so the preview serves what is staged now, not what was staged when it first started.
+  if (livePreview(state.id)) await stopPreview(state.id);
+  const info = await obtainPreview(state, providers.piper);
+  if (!info) {
+    if (["waiting-approval", "waiting-secret", "stopped"].includes(state.preview?.status ?? "")) return { text: `Piper needs Jake before the preview can start: ${state.preview?.issue ?? "unknown reason"}`, needsHuman: true };
+    state.status = "doing";
+    await saveState(state);
+    return { text: `The preview could not start: ${state.preview?.issue ?? "unknown reason"}`, needsHuman: false };
+  }
+  if (!visual) return { text: `The preview is healthy at ${info.url}.`, needsHuman: false };
+  state.preview!.visualReview = undefined;
+  state.preview!.browserResults = undefined;
+  let pass: boolean;
+  try { pass = await visualReview(state, providers, state.preview!); }
+  catch (error) { return { text: `The preview is healthy at ${info.url}, but the browser capture for Wren's review could not run: ${error instanceof Error ? error.message : String(error)}`, needsHuman: false }; }
+  const verdict = (state.preview?.visualReview as string | undefined) ?? "(no verdict)";
+  return { text: `The preview is healthy at ${info.url}. Wren's visual review ${pass ? "passed" : "found issues"}${state.preview?.visualVerified ? "" : " (no screenshot; page structure only)"}:\n${verdict.slice(0, 3_000)}\nBrowser results: ${JSON.stringify(state.preview?.browserResults ?? []).slice(0, 2_000)}`, needsHuman: false };
+}
+
+/** Hollis's release-readiness verification of the staged code, run again each time Marlow asks for it. */
+export async function releaseStep(state: TeamRunState, providers: TeamProviders): Promise<string> {
+  state.release = undefined;
+  await runReleaseStage(state, providers);
+  if (!state.release) return "Hollis's release check did not run: the staged code is not an iOS app.";
+  return formatReleaseSection(state.release);
 }
 
 export async function isWebProject(repo: string): Promise<boolean> {
@@ -474,38 +492,20 @@ async function visualReview(state: TeamRunState, providers: TeamProviders, info:
   return /^PASS:/i.test(verdict.trim()) && !results.some((item) => item.status === "failed");
 }
 
-async function visualFix(state: TeamRunState, providers: TeamProviders): Promise<boolean> {
-  const staging = state.staging!;
-  const worktree = await createBranchWorktree(state.repo, `codex/wren-visual-${state.id}`, staging.branch);
-  const response = await askWithTools(state, "wren", requireToolProvider(providers.wren),
-    `Goal: ${state.goal}\nYour staged-interface review found an issue: ${state.preview?.visualReview}\nBrowser results: ${JSON.stringify(state.preview?.browserResults)}\nThis is the only visual fix pass. Inspect and patch the relevant code in this worktree.`, new WorkspaceTools(worktree.path, "lead"));
-  const changes = await diff(worktree.path);
-  if (!changes || /^NEEDS_INPUT:/i.test(response)) return false;
-  const checks = await runChecks(worktree.path, { repo: state.repo, runDir: state.runDir, taskId: "visual-fix" });
-  const pseudoTask: TeamTask = { id: "visual-fix", title: "Fix staged interface", worker: "wren", dependsOn: [] };
-  const { review, qa } = await evaluateTask(state, pseudoTask, worktree.path, changes, checks, providers, await readLibrary(state));
-  if (needsRepair(review, qa, checks)) { state.preview!.issue = `Visual fix did not pass checks/review: ${review} ${qa}`; return false; }
-  await git(worktree.path, ["add", "-A"]);
-  await git(worktree.path, ["-c", "user.name=Agent Team Wren", "-c", "user.email=agent-team@localhost.invalid", "commit", "-m", "Wren: visual preview fix"]);
-  await git(staging.path, ["merge", "--ff-only", worktree.branch]);
-  await recordRunEvent(state, "wren", "visual-fix", changes.slice(0, 1_000), { summary: "Applied the one staged-interface fix pass" });
-  return true;
-}
-
 export function formatReleaseSection(release: ReleaseStageState): string {
   const label = { ready: "ready", "needs-input": "needs your input", blocked: "blocked", skipped: "skipped", failed: "could not run" }[release.status];
   return `**Release readiness (Hollis): ${label}**\n${release.report.trim()}`;
 }
 
 /**
- * Host-triggered stage, like Piper's: when the repository is an iOS app and the goal is about releasing it, hand the
- * finished staging worktree to Hollis for release readiness. It only verifies and reports. Editing, archive, export,
- * upload and device installs are not available to him here (enforced in the session, not just the prompt): the run's
- * code has not been reviewed or merged yet, so shipping is a separate conversation with Hollis afterwards.
+ * Marlow's release check: hand the staging worktree of an iOS app to Hollis for release readiness. It only verifies
+ * and reports. Editing, archive, export, upload and device installs are not available to him here (enforced in the
+ * session, not just the prompt): the run's code has not been reviewed or merged yet, so shipping is a separate
+ * conversation with Hollis afterwards. Runs once per call site; releaseStep clears the old report to run it again.
  */
 export async function runReleaseStage(state: TeamRunState, providers: TeamProviders): Promise<void> {
   if (state.release || !state.staging) return;
-  if (!await shouldRunReleaseStage(state.goal, state.staging.path)) return;
+  if (!await isIosApp(state.staging.path)) return;
   const at = () => new Date().toISOString();
   const provider = providers.hollis;
   if (!provider) {
@@ -516,7 +516,7 @@ export async function runReleaseStage(state: TeamRunState, providers: TeamProvid
   await recordRunEvent(state, "hollis", "release-stage", "Starting release-readiness verification", { summary: "Hollis started release-readiness verification" });
   try {
     const text = await askWithTools(state, "hollis", requireToolProvider(provider),
-      `Goal: ${state.goal}\nThis is the host's automatic release-readiness stage for the finished work in this worktree. You may only verify and report: ios_discover_project, ios_check_readiness, ios_run_operation for generate-project, build-simulator and test-simulator, ios_release_audit, and ios_release_preflight (dry run). Editing, the release workspace, archive, export, upload and device installs are unavailable here (dry runs excepted); do not try to work around that, and never ask for secrets. Read ios_playbook (overview, signing-and-export) first, and use ios_recent_runs, ios_mac_maintenance and web_search if something fails.\nBegin your reply with exactly one of: RELEASE_READY: (everything automatable is verified; only user-only steps remain), RELEASE_NEEDS_INPUT: (verified so far, but the user must supply or decide something), or RELEASE_BLOCKED: (a verification failed or the Mac or project is not usable). Then give a concise report: what was verified with its evidence, what failed, was pending or is blocked with the exact fix for each, and the next steps for the user (review and merge, then chat with Hollis to archive, export and upload, plus App Store Connect entries, which only the user can do). Do not claim anything a tool did not verify.`,
+      `Goal: ${state.goal}\nMarlow, the lead, asked for a release-readiness check of the work staged in this worktree. You may only verify and report: ios_discover_project, ios_check_readiness, ios_run_operation for generate-project, build-simulator and test-simulator, ios_release_audit, and ios_release_preflight (dry run). Editing, the release workspace, archive, export, upload and device installs are unavailable here (dry runs excepted); do not try to work around that, and never ask for secrets. Read ios_playbook (overview, signing-and-export) first, and use ios_recent_runs, ios_mac_maintenance and web_search if something fails.\nBegin your reply with exactly one of: RELEASE_READY: (everything automatable is verified; only user-only steps remain), RELEASE_NEEDS_INPUT: (verified so far, but the user must supply or decide something), or RELEASE_BLOCKED: (a verification failed or the Mac or project is not usable). Then give a concise report: what was verified with its evidence, what failed, was pending or is blocked with the exact fix for each, and the next steps for the user (review and merge, then chat with Hollis to archive, export and upload, plus App Store Connect entries, which only the user can do). Do not claim anything a tool did not verify.`,
       new WorkspaceTools(state.staging.path, "researcher"), true, undefined, "readiness");
     const status = /^RELEASE_READY:/i.test(text.trim()) ? "ready" : /^RELEASE_BLOCKED:/i.test(text.trim()) ? "blocked" : "needs-input";
     state.release = { status, report: text.trim().replace(/^RELEASE_(?:READY|NEEDS_INPUT|BLOCKED):\s*/i, ""), at: at() };
@@ -527,64 +527,61 @@ export async function runReleaseStage(state: TeamRunState, providers: TeamProvid
   await saveState(state);
 }
 
-async function finishRun(state: TeamRunState, providers: TeamProviders, library: string): Promise<TeamRunState> {
-  if (await isWebProject(state.staging!.path) && state.preview?.status !== "healthy") {
-    state.status = "doing"; await saveState(state);
-    const info = await obtainPreview(state, providers.piper);
-    if (!info) return state;
+/**
+ * For an iOS release goal, the steps only Jake can take after the run: the team verifies, it never signs or uploads.
+ * Fixed text plus the blockers Hollis's readiness check named; never secret values. Undefined for any other run.
+ */
+export async function shippingNotes(state: TeamRunState): Promise<string | undefined> {
+  if (!state.staging || !goalMentionsRelease(state.goal) || !await isIosApp(state.staging.path)) return undefined;
+  const lines = [
+    "**Shipping notes (steps for you)**",
+    "The team only verified the release. Nothing was signed, archived or uploaded. After you review and merge this run:",
+    `1. Allow signing: \`npm run ios -- grant signing --repo "${state.repo}"\``,
+    `2. Allow upload: \`npm run ios -- grant upload --repo "${state.repo}"\``,
+    `3. Chat with Hollis at his desk (or \`npm run team -- ask --run "${state.runDir}" --persona hollis --message "Archive, export and upload the build"\`) and ask him to archive, export and upload. He checks readiness again first and stops at anything only you can do.`,
+    "4. In App Store Connect (only you can do these): fill in the app listing, upload the screenshots, answer App Privacy and the age rating, answer export compliance, then select the uploaded build and click Add for Review.",
+  ];
+  if (!state.release) lines.push(`Hollis's readiness check did not run in this run. Check first with \`npm run ios -- readiness --repo "${state.repo}"\` and \`npm run ios -- audit --repo "${state.repo}"\`.`);
+  else if (state.release.status === "ready") lines.push("Hollis's readiness check found no blockers.");
+  else {
+    const flagged = state.release.report.split("\n").map((line) => line.trim()).filter((line) => /block|fail|missing|pending|requires?|needs?|not (?:set|configured|granted)/i.test(line)).slice(0, 12);
+    lines.push(`Blockers from Hollis's readiness check (${formatReleaseSection(state.release).split("\n")[0].replace(/^\*\*Release readiness \(Hollis\): |\*\*$/g, "")}):`, ...(flagged.length ? flagged.map((line) => `- ${line.replace(/^[-*•]\s*/, "")}`) : [state.release.report.trim().slice(0, 1_500)]));
   }
-  if (state.preview?.status === "healthy" && !state.preview.visualReview) {
-    let pass: boolean;
-    try { pass = await visualReview(state, providers, state.preview); }
-    catch (error) { state.preview.issue = `Piper's browser capture could not run: ${error instanceof Error ? error.message : String(error)}`; state.status = "blocked"; await saveState(state); return state; }
-    if (/^NEEDS_VISION:/i.test(state.preview.visualReview ?? "")) {
-      state.preview.issue = "Piper asks you to choose a vision-capable model at Wren's desk, then resume the Test Bench.";
-      state.status = "blocked"; await saveState(state); return state;
-    }
-    if (!pass && !state.preview.visualFixAttempted) {
-      state.preview.visualFixAttempted = true;
-      await saveState(state);
-      if (await visualFix(state, providers)) {
-        await stopPreview(state.id);
-        state.preview.status = "stopped";
-        state.preview.visualReview = undefined;
-        const fresh = await obtainPreview(state, providers.piper);
-        if (!fresh) return state;
-        pass = await visualReview(state, providers, fresh);
-      }
-    }
-    if (!pass) { state.preview.issue ??= "The staged interface still needs attention after one visual fix pass."; state.status = "blocked"; await saveState(state); return state; }
-  }
-  if (state.preview?.visualReview && (!/^PASS:/i.test(state.preview.visualReview.trim()) || state.preview.browserResults?.some((item) => item.status === "failed"))) {
-    state.status = "blocked";
-    state.preview.issue ??= "The staged interface still needs attention after one visual fix pass.";
-    await saveState(state);
-    return state;
-  }
-  await runReleaseStage(state, providers);
-  {
-    const taskSummary = state.tasks.map((item) => `${item.id}: ${item.status}; checks: ${item.checks?.map((check) => `${check.name} ${check.status}`).join(", ")}; review: ${item.review ?? "none"}; QA: ${item.qa ?? "none"}`).join("\n") + (state.integrationChecks ? `\nThis run was updated against newer repository code. Task notes above describe the original build. Checks on the combined code: ${JSON.stringify(state.integrationChecks)}` : "");
-    const fullDiff = await git(state.staging!.path, ["diff", "--no-ext-diff", `${state.baseCommit}..HEAD`, "--", "."]);
-    const diffStat = await git(state.staging!.path, ["diff", "--no-ext-diff", "--stat=160", `${state.baseCommit}..HEAD`, "--", "."]);
-    const finalDiff = fullDiff.length <= 24_000 ? fullDiff : `${fullDiff.slice(0, 24_000)}
+  return redactSecrets(lines.join("\n"));
+}
+
+/** Marlow's finish: his summary for review, Tove's memory note, the release report, his calls to double-check and any shipping notes. */
+export async function finishRun(state: TeamRunState, providers: TeamProviders, library: string): Promise<TeamRunState> {
+  const director = state.director;
+  const overrides = director?.overrides ?? [];
+  const taskSummary = state.tasks.map((item) => `${item.id}: ${item.status}; worker: ${state.plan?.tasks.find((task) => task.id === item.id)?.worker ?? "unknown"}; checks: ${checksLine(item.checks)}; review: ${item.review ?? "none"}; QA: ${item.qa ?? "none"}`).join("\n") + (state.integrationChecks ? `\nThis run was updated against newer repository code. Task notes above describe the original build. Checks on the combined code: ${JSON.stringify(state.integrationChecks)}` : "");
+  const fullDiff = await git(state.staging!.path, ["diff", "--no-ext-diff", `${state.baseCommit}..HEAD`, "--", "."]);
+  const diffStat = await git(state.staging!.path, ["diff", "--no-ext-diff", "--stat=160", `${state.baseCommit}..HEAD`, "--", "."]);
+  const finalDiff = fullDiff.length <= 24_000 ? fullDiff : `${fullDiff.slice(0, 24_000)}
 ... diff truncated at 24000 of ${fullDiff.length} characters; the changed-files list covers every file.`;
-    state.summary = (await generateFor(state, "marlow", providers.marlow, {
-      systemPrompt: `${roster.marlow.systemPrompt}\n${await personaContext(state.repo, "marlow")}`,
-      maxOutputTokens: 4096,
-      userPrompt: `Summarize the completed goal and what the user should review before merging. Keep it short: one sentence on what was built, then at most 6 bullets covering what to check by hand and any real risks. No preamble, no nested lists. If the diff below was truncated, say so in one line and use the changed-files list for what you could not read. Goal: ${state.goal}\nPlan: ${JSON.stringify(state.plan)}\nTasks:\n${taskSummary}\nPreview: ${JSON.stringify(state.preview ? { status: state.preview.status, browserResults: state.preview.browserResults, visualReview: state.preview.visualReview, visualVerified: state.preview.visualVerified } : "not applicable")}\nChanged files:
+  state.summary = (await generateFor(state, "marlow", providers.marlow, {
+    systemPrompt: `${roster.marlow.systemPrompt}\n${await personaContext(state.repo, "marlow")}`,
+    maxOutputTokens: 4096,
+    userPrompt: `Summarize the completed goal and what the user should review before merging. Keep it short: one sentence on what was built, then at most 6 bullets covering what to check by hand and any real risks. No preamble, no nested lists. If the diff below was truncated, say so in one line and use the changed-files list for what you could not read. Goal: ${state.goal}\nYour closing note: ${director?.finishNote ?? "(none)"}\nCalls you made that the user should double-check: ${overrides.length ? overrides.join("; ") : "none"}\nPlan: ${JSON.stringify(state.plan)}\nTasks:\n${taskSummary}\nPreview: ${JSON.stringify(state.preview ? { status: state.preview.status, browserResults: state.preview.browserResults, visualReview: state.preview.visualReview, visualVerified: state.preview.visualVerified } : "not run")}\nChanged files:
 ${diffStat}
 Final diff:
 ${finalDiff}`,
-    })).text;
-    state.memoryNote = (await generateFor(state, "tove", providers.tove, {
-      systemPrompt: `${roster.tove.systemPrompt}\n${await personaContext(state.repo, "tove")}`,
-      userPrompt: `Write concise Markdown memory for future runs. Use the QA findings and final diff below as evidence. Record verified repository conventions, decisions, and remaining uncertainty only. Goal: ${state.goal}\nPlan: ${JSON.stringify(state.plan)}\nTasks:\n${taskSummary}\nFinal diff:\n${finalDiff.slice(0, 24_000)}\nHuman decisions: ${JSON.stringify(state.decisions ?? [])}\nExisting library:\n${library}`,
-    })).text;
-    if (state.release && state.release.status !== "skipped") state.summary = `${state.summary}\n\n${formatReleaseSection(state.release)}`;
-    state.status = "awaiting-review";
-    state.needsPreviewReview = false;
-    await logEvent(state, "host", "awaiting-review", state.staging!.path);
-  }
+  })).text;
+  state.memoryNote = (await generateFor(state, "tove", providers.tove, {
+    systemPrompt: `${roster.tove.systemPrompt}\n${await personaContext(state.repo, "tove")}`,
+    userPrompt: `Write concise Markdown memory for future runs. Use the QA findings and final diff below as evidence. Record verified repository conventions, decisions, and remaining uncertainty only. Goal: ${state.goal}\nPlan: ${JSON.stringify(state.plan)}\nTasks:\n${taskSummary}\nFinal diff:\n${finalDiff.slice(0, 24_000)}\nHuman decisions: ${JSON.stringify(state.decisions ?? [])}\nExisting library:\n${library}`,
+  })).text;
+  const sections = [state.summary.trim()];
+  if (state.release && state.release.status !== "skipped") sections.push(formatReleaseSection(state.release));
+  if (overrides.length) sections.push(`**Marlow's calls to double-check**\n${overrides.map((item) => `- ${item}`).join("\n")}`);
+  const shipping = await shippingNotes(state);
+  if (shipping) sections.push(shipping);
+  state.summary = sections.join("\n\n");
+  state.status = "awaiting-review";
+  state.needsPreviewReview = false;
+  state.question = undefined;
+  if (director) director.finished = true;
+  await logEvent(state, "host", "awaiting-review", state.staging!.path);
   await saveState(state);
   return state;
 }
@@ -597,8 +594,9 @@ export async function runTeamGoal(repoPath: string, goal: string, injectedProvid
   const state = await createRunState(repo, goal, baseCommit);
   const library = await readLibrary(state);
   try {
+    const shape = `{"summary":"...","tasks":[{"id":"short-slug","title":"specific task","worker":"${WORKER_IDS.join("|")}","dependsOn":[],"research":false}]}`;
     const planText = await askWithTools(state, "marlow", requireToolProvider(providers.marlow),
-      `Goal: ${goal}\nShared library:\n${library || "(empty)"}\nInspect repository files, then return ONLY a JSON object with this shape: {"summary":"...","tasks":[{"id":"short-slug","title":"specific coding task","worker":"kit|wren|rowan","dependsOn":[]}]}. Use 1-4 tasks. Assign Kit implementation/tests, Wren user interface work, Rowan refactoring. Keep tasks small, with dependencies listed by ID. Tasks run in parallel in separate worktrees whenever their dependencies allow, so split the goal into independent tasks that touch different files and leave dependsOn empty for them. Add a dependency only when a task needs another task's output or would edit the same files; chain the rest. Do not serialize work out of habit. Do not assign reviewers or QA as extra tasks.`,
+      `Goal: ${goal}\nShared library:\n${library || "(empty)"}\nYour team and what each can do:\n${capabilityList()}\nInspect repository files, then return ONLY a JSON object with this shape: ${shape}. This is your opening plan; you direct the run from here and can add, reassign or skip work later as results come in. Give each task to the teammate whose tools can actually do it (for example, iOS release verification is Hollis's, not a coder's). Set "research": true when Juniper should write a brief first. Keep tasks small, with dependencies listed by ID. Tasks run in parallel in separate worktrees whenever their dependencies allow, so split the goal into independent tasks that touch different files and leave dependsOn empty for them. Add a dependency only when a task needs another task's output or would edit the same files. Do not add review or QA as tasks; you request those when work comes back.`,
       new WorkspaceTools(repo, "researcher"));
     try {
       state.plan = parsePlan(planText);
@@ -608,7 +606,7 @@ ${planText}`);
       const corrected = await generateFor(state, "marlow", providers.marlow, {
         systemPrompt: roster.marlow.systemPrompt,
         maxOutputTokens: 8192,
-        userPrompt: `Your previous plan was invalid: ${error instanceof Error ? error.message : String(error)} Return ONLY a JSON object with exactly this shape, with no text before or after it, and every task must have a "title" string: {"summary":"...","tasks":[{"id":"short-slug","title":"specific coding task","worker":"kit|wren|rowan","dependsOn":[]}]}. Use 1-4 tasks. Keep the summary to a few sentences and each title under ${MAX_TASK_TITLE} characters so the reply is not cut off. Previous response:
+        userPrompt: `Your previous plan was invalid: ${error instanceof Error ? error.message : String(error)} Return ONLY a JSON object with exactly this shape, with no text before or after it, and every task must have a "title" string: ${shape}. Use 1-${MAX_PLAN_TASKS} tasks. Keep the summary to a few sentences and each title under ${MAX_TASK_TITLE} characters so the reply is not cut off. Previous response:
 ${planText.slice(0, 8_000)}`,
       });
       try {
@@ -624,12 +622,14 @@ ${corrected.text}`);
       }
     }
     state.tasks = state.plan.tasks.map((task) => ({ id: task.id, status: "todo" }));
+    const director = initDirector(state);
+    director.decisions = 1;
+    director.history.push({ at: new Date().toISOString(), action: "plan", args: {}, ok: true, summary: `Marlow planned ${state.plan.tasks.length} task${state.plan.tasks.length === 1 ? "" : "s"}: ${state.plan.tasks.map((task) => `${task.title.slice(0, 80)} (${roster[task.worker].name})`).join("; ")}`, result: "" });
     await saveState(state);
-    await recordRunEvent(state, "marlow", "plan", JSON.stringify(state.plan), { summary: `Planned ${goal}` });
+    await recordRunEvent(state, "marlow", "plan", JSON.stringify(state.plan), { summary: director.history[0].summary });
 
     state.staging = await createBranchWorktree(repo, `codex/team-${state.id}`, baseCommit);
-    const sharedContext = `${library || "(empty)"}\n\nCurrent plan:\n${JSON.stringify(state.plan)}`;
-    return await advanceRun(state, providers, sharedContext);
+    return await runDirector(state, providers, library);
   } catch (error) {
     state.status = "blocked";
     await logEvent(state, "host", "error", error instanceof Error ? error.message : String(error));
@@ -641,19 +641,20 @@ ${corrected.text}`);
 /**
  * A blocked run keeps working from the checkout it started on. When that checkout has moved on (other runs merged),
  * fold the new commits into the staging branch and rebase the run's base, so the run resumes on current code instead
- * of refusing to continue. Conflicts go to the blocked task's worker, as they do between parallel tasks.
+ * of refusing to continue. Conflicts go to the asked-about task's worker when it can edit files, otherwise to Kit.
  */
-async function catchUpBlockedRun(state: TeamRunState, repo: string, blocked: TaskState, providers: TeamProviders): Promise<void> {
+async function catchUpBlockedRun(state: TeamRunState, repo: string, taskId: string | undefined, providers: TeamProviders): Promise<void> {
   const head = await git(repo, ["rev-parse", "HEAD"]);
   if (head === state.baseCommit) return;
   const staging = state.staging!;
-  const task = state.plan!.tasks.find((item) => item.id === blocked.id);
+  const task = state.plan!.tasks.find((item) => item.id === taskId) ?? state.plan!.tasks[0];
+  const resolver: PersonaId = task && WRITING_WORKERS.includes(task.worker) ? task.worker : "kit";
   if (await git(staging.path, ["status", "--porcelain", "--untracked-files=all"])) throw new Error(`The team's staging worktree has unsaved edits, so this run cannot be brought up to date: ${staging.path}`);
   const identity = ["-c", "user.name=Agent Team", "-c", "user.email=agent-team@localhost.invalid"];
   try { await git(staging.path, [...identity, "merge", "--no-edit", head]); }
   catch (error) {
     const conflicted = (await git(staging.path, ["diff", "--name-only", "--diff-filter=U"]).catch(() => "")).split("\n").filter(Boolean);
-    const resolved = Boolean(task) && await resolveMergeConflicts(state, task!, staging.path, conflicted, requireToolProvider(providers[task!.worker]), new WorkspaceTools(staging.path, "lead"), identity);
+    const resolved = Boolean(task) && await resolveMergeConflicts(state, task!, resolver, staging.path, conflicted, providerFor(providers, resolver), new WorkspaceTools(staging.path, "lead"), identity);
     if (!resolved) {
       await git(staging.path, ["merge", "--abort"]).catch(() => undefined);
       throw new Error(`Your checkout moved on and this run's work conflicts with it (${conflicted.join(", ") || "no conflict files reported"}). The team could not reconcile it automatically; discard this run and start the goal again from the current code. ${error instanceof Error ? error.message : String(error)}`);
@@ -666,37 +667,61 @@ async function catchUpBlockedRun(state: TeamRunState, repo: string, blocked: Tas
   await saveState(state);
 }
 
+/** The human's answer goes to Marlow, who decides what happens next; the run picks up where it paused. */
 export async function answerTeamRun(runDir: string, answer: string, injectedProviders?: TeamProviders): Promise<TeamRunState> {
   if (!answer.trim()) throw new Error("Provide a non-empty answer or guidance.");
   const state = await loadState(runDir);
   if (state.status !== "blocked" || !state.staging || !state.plan) throw new Error("Run has no resumable blocked task.");
+  const question = state.question;
   const blocked = state.tasks.find((task) => task.status === "blocked");
-  if (!blocked) throw new Error("Run has no blocked task.");
+  if (!question && !blocked) throw new Error("Run has no question waiting for an answer.");
+  const taskId = question?.taskId ?? blocked?.id;
   const repo = await resolveCleanRepo(state.repo);
   const providers = injectedProviders ?? await defaultProviders(repo);
-  await catchUpBlockedRun(state, repo, blocked, providers);
+  await catchUpBlockedRun(state, repo, taskId, providers);
   state.decisions ??= [];
-  state.decisions.push({ taskId: blocked.id, answer: answer.trim(), at: new Date().toISOString() });
-  await logEvent(state, "user", "answer", `${blocked.id}: ${answer}`);
-  const worker = state.plan.tasks.find((task) => task.id === blocked.id)?.worker;
-  if (worker) await recordRunEvent(state, worker, "received-answer", answer, { taskId: blocked.id, summary: `Received guidance for ${state.plan.tasks.find((task) => task.id === blocked.id)?.title ?? blocked.id}` });
+  state.decisions.push({ taskId: taskId ?? "run", answer: answer.trim(), at: new Date().toISOString() });
+  await logEvent(state, "user", "answer", `${taskId ?? "run"}: ${answer}`);
+  await recordRunEvent(state, "marlow", "received-answer", answer, { taskId, summary: `Marlow received Jake's answer${question ? ` to: ${question.summary.slice(0, 120)}` : ""}` });
+  // A run blocked by the older flow parks its task as "blocked"; Marlow picks it up from "review".
+  if (blocked) blocked.status = "review";
+  for (const task of state.tasks) task.triageNote = undefined;
+  const director = initDirector(state);
+  if (director.decisions >= director.allowance) director.allowance = director.decisions + maxDecisions();
+  director.pendingEvents.push({ at: new Date().toISOString(), kind: "human-answer", taskId, text: `Jake answered${question ? ` your question ("${question.summary.slice(0, 600)}")` : ""}: ${answer.trim()}` });
+  state.question = undefined;
   await saveState(state);
-  const library = await readLibrary(state);
-  return advanceRun(state, providers, `${library || "(empty)"}\n\nCurrent plan:\n${JSON.stringify(state.plan)}`, answer.trim(), blocked.id);
+  return runDirector(state, providers, await readLibrary(state));
 }
 
+/**
+ * After the human approves Piper's command or supplies a secret (or after an update needs a fresh look), start the
+ * preview again. Mid-run, the result goes back to Marlow; for a finished run, only the preview and Wren's review rerun.
+ */
 export async function resumeTeamPreview(runDir: string, approvedCommand?: string, injectedProviders?: TeamProviders): Promise<TeamRunState> {
   const state = await loadState(runDir);
-  if (!state.staging || !state.plan || !state.tasks.every((task) => task.status === "done")) throw new Error("Run is not ready for a preview.");
-  const repo = state.repo;
+  if (!state.staging || !state.plan) throw new Error("Run is not ready for a preview.");
   if (approvedCommand) {
     if (state.preview?.command !== approvedCommand || state.preview.status !== "waiting-approval") throw new Error("This command is not awaiting approval.");
     state.preview.approvedKeys = [...new Set([...(state.preview.approvedKeys ?? []), state.preview.commandKey!])];
   }
   if (/^NEEDS_VISION:/i.test(state.preview?.visualReview ?? "")) { state.preview!.visualReview = undefined; state.preview!.issue = undefined; }
+  const providers = injectedProviders ?? await defaultProviders(state.repo);
+  const finished = Boolean(state.director?.finished) || state.status === "awaiting-review";
   state.status = "doing";
   await saveState(state);
-  return finishRun(state, injectedProviders ?? await defaultProviders(repo), await readLibrary(state));
+  if (finished) {
+    const result = await previewStep(state, providers, true);
+    await recordRunEvent(state, "piper", "preview-review", result.text.slice(0, 2_000), { summary: "Re-ran the preview for review" });
+    if (result.needsHuman) { state.status = "blocked"; await saveState(state); return state; }
+    state.status = "awaiting-review";
+    state.needsPreviewReview = false;
+    await saveState(state);
+    return state;
+  }
+  initDirector(state).pendingEvents.push({ at: new Date().toISOString(), kind: "preview-resumed", text: "Jake dealt with Piper's preview request. Call run_preview again if you still want the preview." });
+  await saveState(state);
+  return runDirector(state, providers, await readLibrary(state));
 }
 
 export async function startTeamPreview(runDir: string, injectedProviders?: TeamProviders): Promise<TeamRunState> {

@@ -4,7 +4,7 @@ import { git } from "../coding/git.js";
 import type { ModelProvider, ToolCapableProvider, ToolRequest, ToolResponse } from "../core/provider.js";
 import { healthyApp, iosRepo, withData, type IosRepo } from "../ios/test-helpers.js";
 import { createRunState, saveState, type TeamRunState } from "./state.js";
-import { formatReleaseSection, runReleaseStage, type TeamProviders } from "./workflow.js";
+import { formatReleaseSection, releaseStep, runReleaseStage, shippingNotes, type TeamProviders } from "./workflow.js";
 
 const RELEASE_GOAL = "Add a settings screen and get the app ready for the App Store";
 
@@ -73,29 +73,49 @@ test("the first line of Hollis's reply decides the status", async () => {
   } finally { await repo.cleanup(); }
 });
 
-test("no stage without both conditions, and no stage when switched off", async () => {
+test("Marlow decides when the check runs; it only runs on an iOS app", async () => {
   const app = await iosRepo(healthyApp());
   const web = await iosRepo({ "package.json": "{}", "index.html": "<html/>" });
-  const previous = process.env.AGENT_TEAM_RELEASE_STAGE;
   try {
     await withData(app, async () => {
       const hollis = hollisProvider("RELEASE_READY: x");
-      const notRelease = await runFor(app, "Add a release notes screen to the app");
-      await runReleaseStage(notRelease, providersWith(hollis)); assert.equal(notRelease.release, undefined);
       const notIos = await runFor(web, "Ship the app to the App Store");
       await runReleaseStage(notIos, providersWith(hollis)); assert.equal(notIos.release, undefined);
-      process.env.AGENT_TEAM_RELEASE_STAGE = "off";
-      const off = await runFor(app, RELEASE_GOAL);
-      await runReleaseStage(off, providersWith(hollis)); assert.equal(off.release, undefined);
-      assert.equal(hollis.calls, 0, "Hollis was never called");
+      assert.match(await releaseStep(notIos, providersWith(hollis)), /not an iOS app/);
+      assert.equal(hollis.calls, 0, "Hollis was never called for a non-iOS repository");
+      const notReleaseGoal = await runFor(app, "Add a settings screen");
+      await runReleaseStage(notReleaseGoal, providersWith(hollis));
+      assert.equal(notReleaseGoal.release?.status, "ready", "the goal wording no longer gates the check: Marlow asked for it");
+      assert.match(await releaseStep(notReleaseGoal, providersWith(hollis)), /Release readiness \(Hollis\): ready/);
+      assert.equal(hollis.calls, 2, "asking again runs the check again");
     });
-  } finally {
-    if (previous === undefined) delete process.env.AGENT_TEAM_RELEASE_STAGE; else process.env.AGENT_TEAM_RELEASE_STAGE = previous;
-    await app.cleanup(); await web.cleanup();
-  }
+  } finally { await app.cleanup(); await web.cleanup(); }
 });
 
-test("a missing provider is skipped, a failing provider is reported without breaking the run, and the stage runs once", async () => {
+test("shipping notes list the upload steps only Jake can take, for iOS release goals only", async () => {
+  const app = await iosRepo(healthyApp());
+  try {
+    await withData(app, async () => {
+      const release = await runFor(app, RELEASE_GOAL);
+      release.release = { status: "blocked", report: "Build verified.\n- Signing permission not granted\n- API key secret missing (password=hunter2)\nAll else fine.", at: "t" };
+      const notes = await shippingNotes(release);
+      assert.ok(notes);
+      assert.match(notes, /^\*\*Shipping notes \(steps for you\)\*\*/);
+      for (const step of ["npm run ios -- grant signing", "npm run ios -- grant upload", "--persona hollis", "App Store Connect", "Add for Review"]) assert.ok(notes.includes(step), step);
+      assert.match(notes, /Blockers from Hollis.s readiness check \(blocked\):\n- Signing permission not granted\n- API key secret missing/);
+      assert.doesNotMatch(notes, /hunter2/, "secret values are redacted");
+      assert.doesNotMatch(notes, /All else fine/);
+      release.release = undefined;
+      assert.match((await shippingNotes(release))!, /readiness check did not run/);
+      assert.equal(await shippingNotes(await runFor(app, "Add a settings screen")), undefined);
+    });
+  } finally { await app.cleanup(); }
+  const web = await iosRepo({ "package.json": "{}", "index.html": "<html/>" });
+  try { await withData(web, async () => assert.equal(await shippingNotes(await runFor(web, RELEASE_GOAL)), undefined)); }
+  finally { await web.cleanup(); }
+});
+
+test("a missing provider is skipped, a failing provider is reported without breaking the run, and a finished check is not repeated by accident", async () => {
   const repo = await iosRepo(healthyApp());
   try {
     await withData(repo, async () => {

@@ -13,6 +13,22 @@ import { PreviewPause, startPreview, stopPreview } from "./runtime.js";
 import { runTeamGoal, type TeamProviders } from "../team/workflow.js";
 import type { ModelRequest, ToolRequest } from "../core/provider.js";
 
+/** Marlow's side of a web run: integrate finished work, ask for the preview, hand visual issues to Wren once, then finish or ask. */
+async function directWebRun(request: ToolRequest): Promise<{ text: string; toolCalls: number }> {
+  const prompt = request.userPrompt;
+  const happened = prompt.slice(prompt.indexOf("What happened since your last decision:"));
+  const act = (name: string, args: Record<string, unknown> = {}) => request.execute(name, args);
+  for (const match of happened.matchAll(/^\[([\w-]+)(?: task=(\S+))?\]([^\n]*)/gm)) {
+    const [, kind, taskId, rest] = match;
+    if (kind === "work-done") await act("integrate", { taskId, reason: "small change" });
+    if (kind === "integrate-done") await act("run_preview", { reason: "check the interface" });
+    if (kind === "preview-done" && /visual review passed/.test(rest)) await act("finish", { summary: "Heading changed and reviewed." });
+    else if (kind === "preview-done" && /found issues/.test(rest) && !/fix-the-heading/.test(prompt)) await act("assign_task", { persona: "wren", title: "Fix the heading", reason: "Wren found a visual issue" });
+    else if (kind === "preview-done") await act("ask_human", { summary: "The preview still needs attention." });
+  }
+  return { text: "Decided.", toolCalls: 1 };
+}
+
 test("Piper cookbook validates paths and flags risky commands", async () => {
   const book = parseCookbook({ version: 1, workingDir: ".", setup: [], build: [], start: "npm run dev", healthPath: "/", variables: {}, secrets: {} });
   assert.equal(book.start, "npm run dev");
@@ -51,6 +67,7 @@ test("a web goal reaches Piper's preview and Wren's browser review before merge"
       },
       async generateWithTools(request: ToolRequest) {
         calls.push(`${name}:tools`);
+        if (name === "marlow" && request.tools.some((tool) => tool.name === "assign_task")) return directWebRun(request);
         if (name === "marlow") return { text: JSON.stringify({ summary: "Change heading", tasks: [{ id: "heading", title: "Change web heading", worker: "kit", dependsOn: [] }] }), toolCalls: 0 };
         if (name === "piper") return { text: JSON.stringify({ version: 1, workingDir: ".", setup: [], build: [], start: "npm run dev", healthPath: "/", variables: {}, secrets: {} }), toolCalls: 0 };
         if (name === "kit") { await request.execute("apply_patch", { path: "server.cjs", oldText: "Hello web", newText: "Hello preview" }); return { text: "Updated heading.", toolCalls: 1 }; }
@@ -66,7 +83,7 @@ test("a web goal reaches Piper's preview and Wren's browser review before merge"
     assert.equal(state.status, "awaiting-review");
     assert.equal(state.preview?.status, "healthy");
     assert.equal(state.preview?.visualVerified, true);
-    assert.equal(state.preview?.visualFixAttempted, true);
+    assert.equal(state.plan?.tasks.find((task) => task.worker === "wren")?.title, "Fix the heading", "Marlow gave the visual issue to Wren");
     assert(state.preview?.browserResults?.some((item) => item.step.includes("expectText") && item.status === "passed"));
     assert(calls.includes("piper:tools"));
     assert(calls.includes("wren:generate"));
@@ -76,8 +93,8 @@ test("a web goal reaches Piper's preview and Wren's browser review before merge"
     const unresolved = await runTeamGoal(root, "Change the web heading again", providers);
     runIds.push(unresolved.id);
     assert.equal(unresolved.status, "blocked");
-    assert.equal(unresolved.preview?.visualFixAttempted, true);
-    assert.equal(visualFixCalls, 2, "one visual fix per run");
+    assert.match(unresolved.question?.summary ?? "", /preview still needs attention/);
+    assert.equal(visualFixCalls, 2, "Marlow chose one visual fix per run");
   } finally {
     for (const id of runIds) await stopPreview(id);
     if (previous === undefined) delete process.env.AGENT_TEAM_DATA_DIR; else process.env.AGENT_TEAM_DATA_DIR = previous;
@@ -99,6 +116,7 @@ test("Piper stops after four cookbook repairs and reports a code diagnosis", asy
       name,
       async generate() { return { text: "summary" }; },
       async generateWithTools(request: ToolRequest) {
+        if (name === "marlow" && request.tools.some((tool) => tool.name === "assign_task")) return directWebRun(request);
         if (name === "marlow") return { text: JSON.stringify({ summary: "Edit note", tasks: [{ id: "note", title: "Edit note", worker: "kit", dependsOn: [] }] }), toolCalls: 0 };
         if (name === "kit") { await request.execute("apply_patch", { path: "note.txt", oldText: "hello", newText: "bright" }); return { text: "edited", toolCalls: 1 }; }
         if (name === "rowan") return { text: "APPROVED: focused", toolCalls: 0 };
@@ -113,7 +131,7 @@ test("Piper stops after four cookbook repairs and reports a code diagnosis", asy
     });
     const providers = Object.fromEntries(["marlow", "juniper", "kit", "wren", "rowan", "tove", "piper"].map((name) => [name, fake(name)])) as unknown as TeamProviders;
     const state = await runTeamGoal(root, "Edit note in web app", providers);
-    assert.equal(state.status, "blocked");
+    assert.equal(state.status, "blocked", "Marlow asked the human after the preview failed");
     assert.equal(state.preview?.piperAttempts, 5);
     assert.equal(cookbookCalls, 5);
     assert.equal(diagnosisCalls, 1);

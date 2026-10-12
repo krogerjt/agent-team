@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { goalMentionsRelease, isIosApp, releaseStageEnabled, shouldRunReleaseStage } from "./release-trigger.js";
+import { goalMentionsRelease, isIosApp } from "./release-trigger.js";
 import { healthyApp, iosRepo, pbxproj } from "./test-helpers.js";
 
 test("goals about releasing the app trigger the stage; goals that merely contain the word do not", () => {
@@ -43,16 +43,4 @@ test("only iOS applications count: XcodeGen and pbxproj apps yes; non-iOS, libra
     assert.equal(await isIosApp(web.root), false);
     assert.equal(await isIosApp("C:/this/path/does/not/exist"), false);
   } finally { await Promise.all([xcodegen, raw, mac, lib, web].map((repo) => repo.cleanup())); }
-});
-
-test("the stage needs the goal AND an iOS app, and can be switched off", async () => {
-  const app = await iosRepo(healthyApp());
-  const web = await iosRepo({ "package.json": "{}" });
-  try {
-    assert.equal(await shouldRunReleaseStage("Ship the app to the App Store", app.root, {}), true);
-    assert.equal(await shouldRunReleaseStage("Add a settings screen", app.root, {}), false, "an iOS app without a release goal");
-    assert.equal(await shouldRunReleaseStage("Ship the app to the App Store", web.root, {}), false, "a release goal on a non-iOS repository");
-    assert.equal(await shouldRunReleaseStage("Ship the app to the App Store", app.root, { AGENT_TEAM_RELEASE_STAGE: "off" }), false);
-    assert.equal(releaseStageEnabled({ AGENT_TEAM_RELEASE_STAGE: " OFF " }), false); assert.equal(releaseStageEnabled({}), true);
-  } finally { await app.cleanup(); await web.cleanup(); }
 });
