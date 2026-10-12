@@ -6,7 +6,13 @@ test("tool loop limits have generous defaults and can be overridden", () => {
   assert.deepEqual(toolLoopLimits({}), { maxToolCalls: 40, maxRounds: 24 });
   assert.deepEqual(toolLoopLimits({ AGENT_TEAM_MAX_TOOL_CALLS: "55", AGENT_TEAM_MAX_MODEL_ROUNDS: "30" }), { maxToolCalls: 55, maxRounds: 30 });
 });
-import { resolveProviderConfig } from "./config.js";
+import { maxDecisions, resolveProviderConfig } from "./config.js";
+
+test("Marlow's decision backstop defaults to 60 and can be overridden", () => {
+  assert.equal(maxDecisions({}), 60);
+  assert.equal(maxDecisions({ AGENT_TEAM_MAX_DECISIONS: "12" }), 12);
+  assert.throws(() => maxDecisions({ AGENT_TEAM_MAX_DECISIONS: "0" }), /AGENT_TEAM_MAX_DECISIONS/);
+});
 
 test("defaults to mock without credentials", () => {
   assert.deepEqual(resolveProviderConfig("lead", {}), { provider: "mock" });

@@ -1,11 +1,17 @@
-import type { WorkerId } from "../personas/roster.js";
+import { isWorkerId, WORKER_IDS, type WorkerId } from "../personas/roster.js";
 
 export interface TeamTask {
   id: string;
   title: string;
+  /** Any teammate except Marlow; Marlow can reassign it later. */
   worker: WorkerId;
   dependsOn: string[];
+  /** Marlow's call: Juniper writes a brief before the work starts. */
+  research?: boolean;
 }
+
+/** The opening plan is Marlow's first decision; he adds tasks later with assign_task. */
+export const MAX_PLAN_TASKS = 12;
 
 export interface TeamPlan {
   summary: string;
@@ -55,15 +61,16 @@ export function parsePlan(text: string): TeamPlan {
   try { raw = object(extractJsonObject(text)); }
   catch (error) { throw new Error(`Marlow did not return a valid JSON plan. ${error instanceof Error ? error.message : String(error)}`); }
   if (typeof raw.summary !== "string" || !raw.summary.trim()) throw new Error("Plan needs a summary.");
-  if (!Array.isArray(raw.tasks) || raw.tasks.length < 1 || raw.tasks.length > 4) throw new Error("Plan must contain 1-4 tasks.");
+  if (!Array.isArray(raw.tasks) || raw.tasks.length < 1 || raw.tasks.length > MAX_PLAN_TASKS) throw new Error(`Plan must contain 1-${MAX_PLAN_TASKS} tasks.`);
   const tasks: TeamTask[] = raw.tasks.map((entry: unknown) => {
     const task = object(entry);
     if (typeof task.id !== "string" || !/^[a-z][a-z0-9-]{0,30}$/.test(task.id)) throw new Error("Task IDs must be short lowercase slugs.");
     const rawTitle = [task.title, task.name, task.description, task.summary].find((value): value is string => typeof value === "string" && value.trim() !== "");
     if (rawTitle === undefined || rawTitle.length > MAX_TASK_TITLE) throw new Error(`Task ${task.id} needs a title in a "title" field (${MAX_TASK_TITLE} characters or fewer).`);
-    if (task.worker !== "kit" && task.worker !== "wren" && task.worker !== "rowan") throw new Error(`Task ${task.id} has an unknown worker.`);
-    if (!Array.isArray(task.dependsOn) || !task.dependsOn.every((id: unknown) => typeof id === "string")) throw new Error(`Task ${task.id} has invalid dependencies.`);
-    return { id: task.id, title: rawTitle.trim(), worker: task.worker, dependsOn: task.dependsOn };
+    if (!isWorkerId(task.worker)) throw new Error(`Task ${task.id} has an unknown worker; choose one of ${WORKER_IDS.join(", ")}.`);
+    const dependsOn = task.dependsOn ?? [];
+    if (!Array.isArray(dependsOn) || !dependsOn.every((id: unknown) => typeof id === "string")) throw new Error(`Task ${task.id} has invalid dependencies.`);
+    return { id: task.id, title: rawTitle.trim(), worker: task.worker, dependsOn, ...(task.research === true ? { research: true } : {}) };
   });
   const ids = new Set(tasks.map((task) => task.id));
   if (ids.size !== tasks.length) throw new Error("Task IDs must be unique.");
@@ -72,6 +79,15 @@ export function parsePlan(text: string): TeamPlan {
   }
   orderedTasks({ summary: raw.summary, tasks });
   return { summary: raw.summary.trim(), tasks };
+}
+
+/** A short unique task ID for a task Marlow adds mid-run, in the same shape parsePlan accepts. */
+export function taskSlug(title: string, taken: Iterable<string>): string {
+  const used = new Set(taken);
+  const base = (title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").split("-").slice(0, 4).join("-") || "task").slice(0, 24).replace(/-+$/, "");
+  const start = /^[a-z]/.test(base) ? base : `t-${base}`.slice(0, 24);
+  if (!used.has(start)) return start;
+  for (let n = 2; ; n++) if (!used.has(`${start}-${n}`)) return `${start}-${n}`;
 }
 
 export function orderedTasks(plan: TeamPlan): TeamTask[] {

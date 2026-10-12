@@ -20,12 +20,60 @@ export interface TaskState {
   qa?: string;
   checks?: CheckResult[];
   error?: string;
-  /** How many times Marlow has tried to unblock this task before it goes to the human. */
-  triageAttempts?: number;
+  /** Who gave the current review verdict. */
+  reviewer?: string;
+  /** The worker's last reply, so Marlow sees what they said. */
+  notes?: string;
+  /** Whether the worktree has changes to review and integrate. A verification task may have none. */
+  hasChanges?: boolean;
+  /** How many times each persona has failed this task (error, no changes, failed checks, rejected review or QA). Shown to Marlow. */
+  failures?: Partial<Record<string, number>>;
   /** Marlow's plain-English note when he escalated this task to the human; kept apart from the worker's own error. */
   triageNote?: { summary: string; options: string[]; recommended?: string };
   /** Guidance Marlow already gave this task's worker, so the human can see what was resolved without them. */
   triageLog?: Array<{ guidance: string; at: string }>;
+}
+
+/** Something that happened in the run that Marlow has not seen yet. */
+export interface DirectorEvent {
+  at: string;
+  kind: string;
+  taskId?: string;
+  text: string;
+}
+
+export interface DirectorDecision {
+  at: string;
+  action: string;
+  args: Record<string, unknown>;
+  ok: boolean;
+  /** Plain-English line for the activity feed. */
+  summary: string;
+  result: string;
+}
+
+/** Marlow's decision loop, persisted so a run resumes after the human answers. */
+export interface DirectorState {
+  /** Decisions made so far (each action, or a turn with no action). */
+  decisions: number;
+  /** Decisions allowed before the run goes to the human; raised by one cap each time the human answers. */
+  allowance: number;
+  history: DirectorDecision[];
+  /** Events waiting for Marlow's next turn. */
+  pendingEvents: DirectorEvent[];
+  /** Calls the human should double-check: integrations over failing checks, skipped review or QA, skipped stages. */
+  overrides: string[];
+  /** Marlow's own finish note, once he finishes. */
+  finishNote?: string;
+  finished?: boolean;
+}
+
+export interface HumanQuestion {
+  summary: string;
+  options: string[];
+  recommended?: string;
+  taskId?: string;
+  at: string;
 }
 
 export interface ReleaseStageState {
@@ -45,6 +93,9 @@ export interface TeamRunState {
   plan?: TeamPlan;
   tasks: TaskState[];
   decisions?: Array<{ taskId: string; answer: string; at: string }>;
+  director?: DirectorState;
+  /** Marlow's open question for the human (ask_human, or the decision backstop). */
+  question?: HumanQuestion;
   summary?: string;
   memoryNote?: string;
   integration?: { worktree: Worktree; baseCommit: string; checks?: CheckResult[] };

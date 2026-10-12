@@ -29,6 +29,11 @@ export function maxParallelTasks(env: Environment = process.env): number {
   return value;
 }
 
+/** Runaway backstop: how many decisions Marlow may make in a run before it goes to the human. */
+export function maxDecisions(env: Environment = process.env): number {
+  return positiveLimit(env.AGENT_TEAM_MAX_DECISIONS, 60, "AGENT_TEAM_MAX_DECISIONS");
+}
+
 const legacyRole: Partial<Record<Role, string>> = {
   marlow: "LEAD",
   juniper: "RESEARCHER",

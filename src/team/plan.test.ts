@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { orderedTasks, parsePlan } from "./plan.js";
+import { orderedTasks, parsePlan, taskSlug } from "./plan.js";
 
 test("validates and orders dependent worker tasks", () => {
   const plan = parsePlan(JSON.stringify({ summary: "Build a flow", tasks: [
@@ -31,9 +31,24 @@ test("says when a reply was cut off mid-object", () => {
   assert.throws(() => parsePlan("No plan here."), /no JSON object/);
 });
 
+test("any teammate except Marlow can take a task, and Marlow can ask for research", () => {
+  const plan = parsePlan(JSON.stringify({ summary: "Release", tasks: [
+    { id: "verify", title: "Verify the release", worker: "hollis", dependsOn: [], research: true },
+    { id: "notes", title: "Research the notes", worker: "juniper" },
+  ] }));
+  assert.deepEqual(plan.tasks.map((task) => [task.worker, task.research ?? false, task.dependsOn]), [["hollis", true, []], ["juniper", false, []]]);
+  assert.equal(parsePlan(JSON.stringify({ summary: "x", tasks: Array.from({ length: 6 }, (_, i) => ({ id: `t${i}`, title: "T", worker: "kit", dependsOn: [] })) })).tasks.length, 6);
+});
+
+test("task slugs are short, valid and unique", () => {
+  assert.equal(taskSlug("Archive and upload the build", []), "archive-and-upload-the");
+  assert.equal(taskSlug("Archive and upload the build", ["archive-and-upload-the"]), "archive-and-upload-the-2");
+  assert.match(taskSlug("123 !!!", []), /^[a-z][a-z0-9-]{0,30}$/);
+});
+
 test("rejects invalid workers and cycles", () => {
-  assert.throws(() => parsePlan(JSON.stringify({ summary: "x", tasks: [
-    { id: "task", title: "Task", worker: "juniper", dependsOn: [] },
+  for (const worker of ["marlow", "nobody"]) assert.throws(() => parsePlan(JSON.stringify({ summary: "x", tasks: [
+    { id: "task", title: "Task", worker, dependsOn: [] },
   ] })), /unknown worker/);
   assert.throws(() => parsePlan(JSON.stringify({ summary: "x", tasks: [
     { id: "one", title: "One", worker: "kit", dependsOn: ["two"] },
