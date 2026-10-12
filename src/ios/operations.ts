@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { git } from "../coding/git.js";
 import { collectFiles, downloadAttachments, quote, remotePaths, sshScript, upload, type RemoteScriptRunner } from "../remote/executor.js";
+import { NORMALIZE_SCRIPT_LINE_ENDINGS } from "../remote/line-endings.js";
 import { buildKeychainShell, keychainRedactionPipeline, keychainSecretLookup } from "../remote/keychain.js";
 import type { RemoteBuildHost, RemoteProjectSettings } from "../remote/settings.js";
 import * as cmd from "./commands.js";
@@ -198,6 +199,7 @@ ${keychainSearch}
 ${plan.needsSource ? `cd ${paths.source}` : `mkdir -p ${paths.job}`}
 set +e
 code=0
+${plan.needsSource ? NORMALIZE_SCRIPT_LINE_ENDINGS : ""}
 ${plan.preScript ?? ""}
 ${setup}
 ${steps}

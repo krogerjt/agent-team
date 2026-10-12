@@ -6,6 +6,7 @@ import { git } from "../coding/git.js";
 import type { CheckArtifact, CheckCommand, CheckResult, CheckRunContext } from "../coding/checks.js";
 import { selectSimulatorDestination } from "../coding/apple.js";
 import { readRemoteBuildHost, readRemoteProjectSettings, validateRemoteBuildHost, type RemoteBuildHost } from "./settings.js";
+import { NORMALIZE_SCRIPT_LINE_ENDINGS } from "./line-endings.js";
 import { buildKeychainShell, keychainHealthScript, keychainRedactionPipeline, keychainRedactionScript, keychainSecretLookup, keychainSecretStore } from "./keychain.js";
 
 export interface RemoteReadinessItem { name: string; ok: boolean; detail: string }
@@ -153,7 +154,7 @@ export async function runRemoteChecks(root: string, commands: CheckCommand[], co
   try {
     await upload(root, host, paths.source);
     if (project.setupCommand) {
-      const setup = await sshScript(host, `set -e\ncd ${paths.source}\n${project.setupCommand}\n`, 600_000);
+      const setup = await sshScript(host, `set -e\ncd ${paths.source}\n${NORMALIZE_SCRIPT_LINE_ENDINGS}\n${project.setupCommand}\n`, 600_000);
       if (setup.code !== 0) return commands.map((command) => ({ name: command.name, status: "failed", required: true, executor: host.target, output: `Remote preparation failed:\n${setup.output}` }));
     }
     const secretEntries = Object.entries(project.secrets);

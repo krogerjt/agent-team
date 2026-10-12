@@ -274,6 +274,8 @@ test("repository secret mappings are exported from the Keychain by name and reda
     assert.match(script, /export API_BASE="\$\(\/usr\/bin\/security find-generic-password -w -a 'backend-base-url'/);
     assert.match(script, /perl -0pe 's\/\\Q\$ENV\{API_BASE\}\\E\/\[redacted\]\/g'/);
     assert.match(script, /pod install/);
+    // CRLF scripts from a Windows checkout are fixed before the preparation command runs.
+    assert.ok(script.indexOf("perl -pi -e") > -1 && script.indexOf("perl -pi -e") < script.indexOf("repository preparation"), "line endings are normalized before the preparation command");
   } finally { await repo.cleanup(); }
 });
 
