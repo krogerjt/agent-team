@@ -143,11 +143,13 @@ Hollis runs the whole release workflow end to end, including the parts that took
 - **Search the web for errors.** `web_search` (DuckDuckGo's HTML results) and `web_fetch` are read-only. Queries containing anything that looks like a secret, key, token or identifier are refused before any request. Fetches are HTTPS only with no cookies, size-limited, text-only, and refuse localhost, private and link-local addresses (re-checked after every redirect). Results are labelled untrusted: Hollis treats them as data and never follows instructions in them. Limits are 8 searches and 8 fetches per conversation. Because the search page is scraped, it can break or be rate-limited; Hollis then fetches a documentation URL directly.
 - **Longer runs.** His tool-loop budget is three times the usual (`AGENT_TEAM_MAX_TOOL_CALLS` and `AGENT_TEAM_MAX_MODEL_ROUNDS` times 3), since a release is many slow Mac operations in a row.
 
-### Automatic hand-off from a team run
+### Release checks inside a team run
 
-Like Piper's preview stage, the host hands a finished run to Hollis by rule. When a run's staging worktree is an **iOS application** (an app target for iOS in the Xcode project or XcodeGen spec) **and the goal is about releasing it** (for example "…get the app ready for the App Store", "prepare this for TestFlight", "release build", "ship the app"), Hollis runs a **release-readiness stage** after the tasks finish and before the final summary. A goal that only contains the word, such as "add a release notes screen", does not trigger it, and neither does a non-iOS repository.
+Marlow decides whether Hollis runs a **release-readiness check** during a run (`run_release_check`), and may run it again after fixes. It only runs on an **iOS application** (an app target for iOS in the Xcode project or XcodeGen spec); anywhere else Marlow gets an error back. Marlow can also hand Hollis a verification task or ask him a question directly.
 
-The stage only **verifies and reports**. That is enforced in his tool session, not just his prompt: he can run discovery, Mac readiness, simulator build and tests, the release audit and a dry-run preflight, but he has no editing or release-workspace tools, and archive, export, upload, release builds and device installs are refused (dry runs excepted) even if you have granted those permissions. A run's code has not been reviewed or merged yet, so shipping is a separate conversation with Hollis afterwards. His report opens with `RELEASE_READY`, `RELEASE_NEEDS_INPUT` or `RELEASE_BLOCKED`, is saved on the run as `release`, and is appended to the review summary as "Release readiness (Hollis)". A missing provider or a model failure is recorded as "skipped" or "could not run" and never blocks the run. It runs once per run. Set `AGENT_TEAM_RELEASE_STAGE=off` to disable it.
+Inside a run Hollis only **verifies and reports**. That is enforced in his tool session, not just his prompt: he can run discovery, Mac readiness, simulator build and tests, the release audit and a dry-run preflight, but he has no editing or release-workspace tools, and archive, export, upload, release builds and device installs are refused (dry runs excepted) even if you have granted those permissions. A run's code has not been reviewed or merged yet, so shipping is a separate conversation with Hollis afterwards. His report opens with `RELEASE_READY`, `RELEASE_NEEDS_INPUT` or `RELEASE_BLOCKED`, is saved on the run as `release`, and is appended to the review summary as "Release readiness (Hollis)". A missing provider or a model failure is recorded as "skipped" or "could not run" and never blocks the run.
+
+When the goal is about releasing an iOS app (for example "…get the app ready for the App Store", "prepare this for TestFlight", "release build", "ship the app"), the review summary ends with **Shipping notes (steps for you)**: `npm run ios -- grant signing`, `npm run ios -- grant upload`, chatting with Hollis to archive, export and upload, the App Store Connect steps only you can do, and the blockers Hollis's readiness check named (or a reminder to check readiness if Marlow skipped it). Secret values never appear in it. A goal that only contains the word, such as "add a release notes screen", gets no shipping notes.
 
 None of this widens what is user-only: permissions (`grant signing|upload`), credentials, secret-name and Team ID mapping (`npm run ios -- settings`), App Store Connect forms, legal decisions, merging and pushing, and Add for Review stay with you. Hollis gives exact steps for each and stops.
 
@@ -163,14 +165,14 @@ Upload uses Apple's `altool`; if Apple retires it, only `uploadCommand` in `src/
 
 | Persona | Responsibility |
 | --- | --- |
-| Marlow | Inspect the repo, plan up to four tasks, and summarize the result |
-| Juniper | Research each task in the codebase |
+| Marlow | Lead and director: plans the goal, then decides who does what and what happens next (research, review, QA, repairs, reassignment, integration, the preview and the release check), and summarizes the result |
+| Juniper | Research the codebase when Marlow asks for a brief or an answer |
 | Kit | Implement and test general code tasks |
 | Wren | Implement interface tasks |
-| Rowan | Refactor assigned code and review other workers |
-| Tove | Check task acceptance and prepare shared project memory |
-| Piper | Set up and repair the local web preview cookbook |
-| Hollis | On demand, not in run plans: iOS release engineer (discover, Mac readiness, simulator checks, release audit, archive/export/upload with your permission) |
+| Rowan | Refactor assigned code and review other workers' changes when Marlow asks |
+| Tove | QA task acceptance when Marlow asks, and prepare shared project memory |
+| Piper | Set up and repair the local web preview cookbook; diagnose the build environment |
+| Hollis | iOS release engineer. In a run, verify-only tasks and release checks when Marlow asks; archive/export/upload only when you chat with him, with your permission |
 
 Start a goal with:
 
@@ -186,7 +188,9 @@ npm run team -- review --run "<run-directory>"
 npm run team -- events --run "<run-directory>"
 ```
 
-Marlow creates a task plan with dependencies. Tasks execute in dependency order. Each coding worker gets a separate worktree and local branch. Approved task branches advance a staging branch, while your original checkout stays at its starting commit. The run state, plan, and event log are saved under `~/.agent-team/repos/<repo>/runs/`. Tove's memory note is added to the repo's shared library only after you merge.
+Marlow opens with a task plan (any teammate except himself can take a task) and then directs the run. Planned tasks start by themselves once the tasks they depend on are integrated, and independent tasks run in parallel (`AGENT_TEAM_MAX_PARALLEL_TASKS`, default 2), each in its own worktree and local branch. Whenever something happens (a task's work finishes, a review or QA verdict comes in, a check or step fails, you answer a question, or nothing is left running), Marlow is shown the task wall, each teammate's capabilities, check results, verdicts and how many times each teammate has already failed each task, and decides through typed actions: `assign_task`, `request_research`, `request_review`, `request_qa`, `send_back`, `reassign` (the new worker keeps the worktree), `integrate`, `run_preview`, `run_release_check`, `ask_human` and `finish`. The host checks each action and returns a plain error he can react to if it is invalid. Every decision appears in the activity feed with a one-line reason.
+
+Review, QA, research, the preview and the release check happen only when Marlow asks. If he integrates over failing checks, skips review or QA, leaves a task unintegrated, or skips the preview or release check, the review summary lists it under **Marlow's calls to double-check**. Integration fast-forwards a staging branch one task at a time, while your original checkout stays at its starting commit; nothing is pushed. As a runaway backstop, a run pauses and asks you after `AGENT_TEAM_MAX_DECISIONS` decisions (default 60); answering gives Marlow another batch. The run state, plan, and event log are saved under `~/.agent-team/repos/<repo>/runs/`. Tove's memory note is added to the repo's shared library only after you merge.
 
 After reviewing the diff, explicitly merge the staging branch into your original checkout:
 
@@ -194,9 +198,9 @@ After reviewing the diff, explicitly merge the staging branch into your original
 npm run team -- merge --run "<run-directory>"
 ```
 
-Merge requires the original checkout to be clean and still at the starting commit. It is a local fast-forward; no push occurs. A task with unresolved check, review, or QA issues remains blocked in its worktree and cannot be merged through this command. Worktrees and logs remain available for inspection.
+Merge requires the original checkout to be clean and still at the starting commit. It is a local fast-forward; no push occurs. A run that is still in progress or waiting on you cannot be merged through this command. Worktrees and logs remain available for inspection.
 
-If a worker asks a question with `NEEDS_INPUT:` or a task remains blocked, inspect `status` and `review`, then provide guidance to resume that task in its existing worktree:
+When Marlow needs you (a question only you can answer, or the decision backstop), the run pauses. Inspect `status` and `review`, then answer; Marlow gets your answer and decides what happens next, and the task continues in its existing worktree:
 
 ```powershell
 npm run team -- answer --run "<run-directory>" --text "Your decision or repair guidance"
@@ -209,7 +213,7 @@ npm run team -- ask --run "<run-directory>" --persona juniper --message "Which f
 npm run team -- library --repo C:\path\to\your\repo
 ```
 
-`MARLOW_*`, `JUNIPER_*`, `KIT_*`, `WREN_*`, `ROWAN_*`, `TOVE_*`, and `PIPER_*` in `.env` can select providers and models individually. If omitted, they inherit the existing Lead, Researcher, and Reviewer settings shown in `.env.example`. Team tasks currently run in dependency order.
+`MARLOW_*`, `JUNIPER_*`, `KIT_*`, `WREN_*`, `ROWAN_*`, `TOVE_*`, and `PIPER_*` in `.env` can select providers and models individually. If omitted, they inherit the existing Lead, Researcher, and Reviewer settings shown in `.env.example`.
 
 # Workshop UI
 
@@ -233,7 +237,7 @@ The repository control in the workshop header opens recent local projects or add
 
 For a web repository, Piper reads the staged code and saves an environment cookbook outside Git at `~/.agent-team/repos/<repository>/environment-cookbook.json`. The cookbook contains setup, build, and start commands, a local health path, and variable mappings. Piper may revise it four times after startup failures. Piper cannot edit application code. The host runs cookbook commands in the staging worktree, shows risky commands for your decision, and reports a code diagnosis if setup still fails. A missing secret appears as a prompt from Piper.
 
-Open **Test Bench** in the workshop to see the live staged app, Piper's log and cookbook, the latest screenshot, browser steps, and Wren's review. Wren receives a screenshot when their selected model accepts images; otherwise the review says that visual verification was unavailable. Wren or the relevant worker gets one focused code fix pass for an interface issue, followed by another check and preview. Switching runs or pressing **Stop preview** ends the preview process tree. Only the selected run remains live.
+Open **Test Bench** in the workshop to see the live staged app, Piper's log and cookbook, the latest screenshot, browser steps, and Wren's review. Wren receives a screenshot when their selected model accepts images; otherwise the review says that visual verification was unavailable. The preview and Wren's review run when Marlow asks for them. When Wren finds an interface issue, Marlow decides what happens: usually a focused fix task for Wren or the relevant worker, then the preview again. Switching runs or pressing **Stop preview** ends the preview process tree. Only the selected run remains live.
 
 The **Shared secret shelf** stores named values locally using Windows user-scoped encryption or the current user's login Keychain on macOS. The cookbook maps app variable names to those secret names; Piper receives names and redacted command output, never vault values. Preview processes receive only an explicit set of basic operating-system variables and cookbook variables. Wren receives a page screenshot and page text, so avoid showing sensitive data in the previewed interface. The local worktree separates source changes, but commands run with your local account's permissions. Use the Test Bench with repositories you trust. Edge or Chrome must be installed for browser capture and scenarios; the app checks Edge first.
 
