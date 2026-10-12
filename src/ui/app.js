@@ -127,7 +127,15 @@ function marlowNoteHtml(task) {
   return `<div class="marlow-note"><strong>Marlow's note</strong><p>${escapeHtml(note.summary)}</p>${options}${note.recommended ? `<p class="marlow-recommend">Marlow recommends: ${escapeHtml(note.recommended)}</p>` : ""}${options ? "<small>Tap an option to fill in your answer, then edit it if you like.</small>" : ""}</div>`;
 }
 
+// Marlow's open question (ask_human or his decision limit), shaped like a blocked task so the same card can show it.
+function marlowQuestion(run) {
+  if (run?.status !== "blocked" || !run.question) return undefined;
+  const task = run.question.taskId && run.tasks.find((item) => item.id === run.question.taskId);
+  return { ...(task || {}), id: run.question.taskId || "marlow", status: "blocked", question: true, triageNote: run.question, error: task?.error || "" };
+}
+
 function blockedTaskDetails(run, task) {
+  if (task.question) return `<div class="prompt-request">${marlowNoteHtml(task)}${run.question.taskId ? `<div><strong>Task</strong><span>${escapeHtml(taskLabel(task, run))}</span></div>` : ""}<div><strong>What to send</strong><span>Answer Marlow in your own words, or tap one of his options. He decides what the team does next.</span></div></div>`;
   const brief = blockedTaskBrief(run, task);
   const workerName = profile(run.plan?.tasks.find((item) => item.id === task.id)?.worker)?.name || "the worker";
   const findings = brief.findings.map((finding) => `<li><strong>${escapeHtml(finding.label)}:</strong> ${escapeHtml(finding.text)}</li>`).join("");
@@ -144,6 +152,8 @@ function agentStatus(id, run) {
   const task = run.tasks.find((item) => run.plan?.tasks.find((plan) => plan.id === item.id)?.worker === id && ["doing", "review", "blocked"].includes(item.status));
   if (task) return task.status === "blocked" ? "Needs your input" : task.status === "review" ? "In review" : "Working on a task";
   if (run.status === "planning" && id === "marlow") return "Planning the goal";
+  if (id === "marlow" && run.status === "blocked" && run.question) return "Needs your input";
+  if (id === "marlow" && run.status === "doing") return "Directing the team";
   if (run.status === "doing" && id === "juniper" && recentlyActive("juniper")) return "Researching";
   if (run.status === "awaiting-review" && id === "tove") return "QA complete";
   if (id === "piper" && run.preview?.status === "healthy") return "Preview running";
@@ -154,7 +164,7 @@ function agentStatus(id, run) {
 function agentStateClass(id, run) {
   const status = agentStatus(id, run);
   if (status === "Needs your input") return "attention";
-  if (["Working on a task", "Planning the goal", "Researching", "Preview running"].includes(status)) return "working";
+  if (["Working on a task", "Planning the goal", "Directing the team", "Researching", "Preview running"].includes(status)) return "working";
   if (["In review", "QA complete"].includes(status)) return "review";
   return "idle";
 }
@@ -235,10 +245,10 @@ function renderMain() {
   if (state.view === "status") { renderStatusBoard(); return; }
   if (state.view === "analytics") { renderAnalytics(); return; }
   const run = currentRun();
-  const blocked = run?.tasks.find((task) => task.status === "blocked");
+  const blocked = marlowQuestion(run) || run?.tasks.find((task) => task.status === "blocked");
   const piperNeeds = run?.status === "blocked" && run.preview?.issue && !blocked;
   if ((!blocked && !piperNeeds) || $("#input-prompt")?.dataset.run !== run.id) $("#input-prompt")?.remove();
-  const worker = blocked && run?.plan?.tasks.find((task) => task.id === blocked.id)?.worker;
+  const worker = blocked?.question ? "marlow" : blocked && run?.plan?.tasks.find((task) => task.id === blocked.id)?.worker;
   main.innerHTML = `
     <section class="hero"><div class="hero-copy"><div class="eyebrow"><span class="spark">✦</span> A SMALL FACTORY FOR BIG IDEAS</div><h1>Good things are<br><em>built together.</em></h1><p>Give your team a goal, watch each desk light up, and step in when they need you.</p></div><div class="hero-cube" aria-hidden="true"><div class="cube-top"></div><div class="cube-left"></div><div class="cube-right"></div><span>✦</span></div></section>
     ${state.appleProject && !state.remoteHost.enabled ? `<button class="mac-host-banner" id="configure-mac-host"><span>⌘</span><strong>Apple project detected</strong><small>Connect a Mac Build Host so the team can run Xcode and simulator checks.</small><b>Set up →</b></button>` : ""}
@@ -269,7 +279,7 @@ function showInputPrompt(run, blocked, worker) {
   modal.className = "input-prompt-backdrop";
   modal.id = "input-prompt";
   modal.dataset.run = run.id;
-  modal.innerHTML = `<div class="input-prompt" role="dialog" aria-modal="true" aria-label="${escapeHtml(name)} needs your input"><button class="prompt-close" data-close="input" aria-label="Answer later">✕</button><div class="prompt-scene"><div class="prompt-podium"></div>${avatar(worker || "marlow", "prompt-avatar")}<span class="prompt-alert">!</span></div><span class="eyebrow">A MESSAGE FROM THE WORKSHOP</span><h2>${escapeHtml(name)} needs your direction.</h2><p class="prompt-lede">One repair pass is complete, but this task still needs a decision.</p>${details}<form id="answer-pop-form"><textarea name="answer" rows="3" maxlength="8000" placeholder="Write your answer…" required></textarea><button class="primary-button" type="submit">Send answer to ${escapeHtml(name)} →</button></form><small>You can answer later from the task wall.</small>${discardButton(run, "in-modal")}</div>`;
+  modal.innerHTML = `<div class="input-prompt" role="dialog" aria-modal="true" aria-label="${escapeHtml(name)} needs your input"><button class="prompt-close" data-close="input" aria-label="Answer later">✕</button><div class="prompt-scene"><div class="prompt-podium"></div>${avatar(worker || "marlow", "prompt-avatar")}<span class="prompt-alert">!</span></div><span class="eyebrow">A MESSAGE FROM THE WORKSHOP</span><h2>${escapeHtml(name)} needs your direction.</h2><p class="prompt-lede">${blocked.question ? "Marlow paused the run to ask you something." : "This task needs a decision before work can continue."}</p>${details}<form id="answer-pop-form"><textarea name="answer" rows="3" maxlength="8000" placeholder="Write your answer…" required></textarea><button class="primary-button" type="submit">Send answer to ${escapeHtml(name)} →</button></form><small>You can answer later from the task wall.</small>${discardButton(run, "in-modal")}</div>`;
   document.body.append(modal);
 }
 
