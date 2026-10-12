@@ -4,12 +4,12 @@ import { runChecks, type CheckResult } from "../coding/checks.js";
 import { createBranchWorktree, diff, git, resolveCleanRepo } from "../coding/git.js";
 import { WorkspaceTools } from "../coding/workspace-tools.js";
 import { roster, type PersonaId, type WorkerId } from "../personas/roster.js";
-import { orderedTasks, parsePlan, type TeamTask } from "./plan.js";
+import { MAX_TASK_TITLE, orderedTasks, parsePlan, type TeamTask } from "./plan.js";
 import { appendLibrary, createRunState, loadState, logEvent, readLibrary, repoHome, saveState, type ReleaseStageState, type TaskState, type TeamRunState } from "./state.js";
 import { appendChat, configuredProvider, effectiveModel, personaContext, readPersona } from "./persona-store.js";
 import { readToolLoopDiagnostics, trackedGenerate, trackedGenerateWithTools } from "./telemetry.js";
 import { appendTimeline, ensureTimeline, executeMemoryTool, memoryTools } from "./timeline.js";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { extractCookbook, readCookbook, saveCookbook, type Cookbook } from "../preview/cookbook.js";
 import { livePreview, startPreview, stopPreview, PreviewFailure, PreviewPause, PreviewStopped, type PreviewInfo } from "../preview/runtime.js";
@@ -607,15 +607,20 @@ export async function runTeamGoal(repoPath: string, goal: string, injectedProvid
 ${planText}`);
       const corrected = await generateFor(state, "marlow", providers.marlow, {
         systemPrompt: roster.marlow.systemPrompt,
-        userPrompt: `Your previous plan was invalid: ${error instanceof Error ? error.message : String(error)}. Return ONLY a JSON object with exactly this shape, and every task must have a short "title" string: {"summary":"...","tasks":[{"id":"short-slug","title":"specific coding task","worker":"kit|wren|rowan","dependsOn":[]}]}. Use 1-4 tasks. Previous response:
+        maxOutputTokens: 8192,
+        userPrompt: `Your previous plan was invalid: ${error instanceof Error ? error.message : String(error)} Return ONLY a JSON object with exactly this shape, with no text before or after it, and every task must have a "title" string: {"summary":"...","tasks":[{"id":"short-slug","title":"specific coding task","worker":"kit|wren|rowan","dependsOn":[]}]}. Use 1-4 tasks. Keep the summary to a few sentences and each title under ${MAX_TASK_TITLE} characters so the reply is not cut off. Previous response:
 ${planText.slice(0, 8_000)}`,
       });
       try {
         state.plan = parsePlan(corrected.text);
       } catch (retryError) {
-        await logEvent(state, "host", "plan-invalid", `Retry failed: ${retryError instanceof Error ? retryError.message : String(retryError)}
+        const message = retryError instanceof Error ? retryError.message : String(retryError);
+        const replyFile = path.join(state.runDir, "plan-reply.txt");
+        await writeFile(replyFile, `First reply:\n${planText}\n\nRetry reply:\n${corrected.text}\n`, "utf8");
+        await logEvent(state, "host", "plan-invalid", `Retry failed: ${message}
 ${corrected.text}`);
-        throw retryError;
+        const excerpt = corrected.text.length > 1_500 ? `${corrected.text.slice(0, 1_500)}\n... (${corrected.text.length} characters in all)` : corrected.text;
+        throw new Error(`${message}\nMarlow's reply:\n${excerpt}\nFull replies saved at: ${replyFile}`);
       }
     }
     state.tasks = state.plan.tasks.map((task) => ({ id: task.id, status: "todo" }));
