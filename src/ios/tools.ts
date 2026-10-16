@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ToolDefinition, ToolResult } from "../core/provider.js";
 import { readRemoteBuildHost, readRemoteProjectSettings } from "../remote/settings.js";
 import { sshScript, type RemoteScriptRunner } from "../remote/executor.js";
@@ -13,7 +14,8 @@ import { playbookIndex, playbookTopic } from "./playbook.js";
 import { MAINTENANCE_ACTIONS, runMaintenance, type MaintenanceAction } from "./maintenance.js";
 import { readdir, readFile as readTextFile } from "node:fs/promises";
 import path from "node:path";
-import { runsDir } from "./store.js";
+import { runsDir, saveOperationRecord } from "./store.js";
+import { listConnectedDevices, sideloadApp, SIDELOAD_TOOLS, type FileUploader, type SideloadTool } from "./sideload.js";
 import { redactSecrets } from "./redact.js";
 import { buildProgress, resumeAfterBlocker, satisfiedBlockers } from "./session.js";
 import { readIosState, recordStep, type IosReleaseState } from "./store.js";
@@ -43,15 +45,20 @@ const operationTool: ToolDefinition = {
   parameters: schema({ operation: { type: "string", enum: OPERATIONS }, dryRun: { type: "boolean" }, scheme: { type: "string" }, testScope: { type: "string", enum: ["unit", "ui", "all"] }, simulator: { type: "string", description: "Simulator model name, for example iPhone 17 Pro Max." }, captureScreenshots: { type: "boolean", description: "Run the UI tests that save App Store screenshots." }, validateOnly: { type: "boolean" } }, ["operation"]),
 };
 
+const deviceTools: ToolDefinition[] = [
+  { name: "ios_list_devices", description: "List the iPhones and iPads connected to the Mac Build Host (USB or paired over the network), with name, iOS version, UDID, which tool sees them (devicectl, ios-deploy or libimobiledevice), and whether each is ready for an install. Read-only.", parameters: schema({}) },
+  { name: "ios_sideload_app", description: "Install an already-built, already-signed .ipa or .app onto the device connected to the Mac (the only one, the device argument, or the saved preferred device). Nothing is built or signed: the app must be signed for that device (development or ad-hoc profile; App Store exports will not install). app is the .ipa/.app location on this computer (relative paths resolve from the workspace), or on the Mac when onMac=true (absolute or ~/); nothing but a .ipa or .app is accepted. Uses devicectl, falling back to ios-deploy, then libimobiledevice; launch=true opens it afterwards. Success requires the tool to confirm the install. Use dryRun=true to preview.", parameters: schema({ app: { type: "string", description: "A .ipa file or .app bundle." }, onMac: { type: "boolean" }, device: { type: "string", description: "Device UDID from ios_list_devices." }, tool: { type: "string", enum: SIDELOAD_TOOLS }, launch: { type: "boolean" }, dryRun: { type: "boolean" } }, ["app"]) },
+];
+
 const prepareTool: ToolDefinition = {
   name: "ios_prepare_release",
   description: "Release preparation actions. increment-build and set-marketing-version edit literal version values (dryRun defaults to true; pass dryRun=false to write, only when asked). generate-templates creates release/ metadata, privacy-policy and support starters, review notes, export-compliance notes and a checklist without overwriting existing files; every value that needs the user is a [[REQUIRES USER INPUT]] placeholder (never invent legal text, URLs, copyright owners, pricing or Apple account details). validate-files checks that release files exist and have no placeholders. checklist returns the submission checklist. collect-screenshots turns the screenshots from the latest captureScreenshots UI-test run into opaque, correctly sized PNGs under release/screenshots/ (dry run by default).",
   parameters: schema({ action: { type: "string", enum: ["increment-build", "set-marketing-version", "generate-templates", "validate-files", "checklist", "collect-screenshots"] }, marketingVersion: { type: "string" }, dryRun: { type: "boolean" } }, ["action"]),
 };
 
-export const IOS_TOOL_NAMES = [...readTools, operationTool, prepareTool].map((tool) => tool.name);
+export const IOS_TOOL_NAMES = [...readTools, operationTool, prepareTool, ...deviceTools].map((tool) => tool.name);
 export function isIosTool(name: string): boolean { return IOS_TOOL_NAMES.includes(name); }
-export function iosTools(): ToolDefinition[] { return [...readTools, operationTool, prepareTool]; }
+export function iosTools(): ToolDefinition[] { return [...readTools, operationTool, prepareTool, ...deviceTools]; }
 
 export interface IosToolContext {
   /** The worktree to inspect and build. */
@@ -64,6 +71,7 @@ export interface IosToolContext {
   /** Test seams. */
   run?: RemoteScriptRunner;
   overrides?: Partial<OperationDeps>;
+  uploadApp?: FileUploader;
 }
 
 function evidenceFrom(state: IosReleaseState, treeHash: string, discovery: IosDiscovery): AuditEvidence {
@@ -138,6 +146,20 @@ export async function executeIosTool(name: string, args: Record<string, unknown>
     return done(result, !result.ok);
   }
   if (name === "ios_recent_runs") return recentRuns(ctx, typeof args.id === "string" ? args.id : undefined);
+  if (name === "ios_list_devices") {
+    const host = (await operationDeps(ctx)).host;
+    if (!host.enabled || !host.target) return done({ devices: [], error: "No Mac Build Host is enabled.", remedy: "Open Workshop Options → Mac Build Host, save the SSH alias, test it, and enable it." }, true);
+    const probe = await listConnectedDevices(host, ctx.run);
+    return done({ ...probe, report: probe.error ?? (probe.devices.length ? probe.devices.map((device) => `${device.name}${device.os ? ` (iOS ${device.os})` : ""} ${device.udid} via ${device.tool}${device.ready ? "" : `: ${device.note}`}`).join("\n") : "No iPhone or iPad is connected to the Mac.") }, Boolean(probe.error));
+  }
+  if (name === "ios_sideload_app") {
+    if (typeof args.app !== "string" || !args.app.trim()) throw new Error("Pass the .ipa file or .app bundle to install.");
+    const deps = await operationDeps(ctx);
+    const local = args.onMac === true ? args.app : path.resolve(ctx.root, args.app);
+    const result = await sideloadApp({ app: local, onMac: args.onMac === true, udid: typeof args.device === "string" ? args.device : undefined, tool: typeof args.tool === "string" ? args.tool as SideloadTool : undefined, launch: args.launch === true, dryRun: args.dryRun === true }, { host: deps.host, run: ctx.run, preferredUdid: deps.settings.deviceUdid, uploadApp: ctx.uploadApp });
+    if (result.status !== "dry-run") await saveOperationRecord(ctx.repo, `${new Date().toISOString().replace(/[:.]/g, "-")}-sideload-${randomUUID().slice(0, 8)}`, result).catch(() => undefined);
+    return done({ ...result, report: result.remedy ? `${result.summary}\nFix: ${result.remedy}` : result.summary }, result.status === "failed" || result.status === "blocked");
+  }
   const discovery = await discoverIosProject(ctx.root);
   const context = await captureRunContext(ctx.root);
 

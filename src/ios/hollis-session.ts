@@ -87,6 +87,7 @@ export function createHollisSession(options: HollisSessionOptions): HollisSessio
       if (isWebTool(name)) return web(name, args);
       if (readiness) {
         if (READINESS_HIDDEN.has(name)) return { content: "Not available in the automated release-readiness stage. Editing and the release workspace are for a separate conversation with Hollis.", isError: true };
+        if (name === "ios_sideload_app" && args.dryRun !== true) return { content: "Device installs are not available in the automated release-readiness stage: it only verifies and reports. Use dryRun=true to preview it.", isError: true };
         if (name === "ios_run_operation" && RELEASE_ACTIONS.has(String(args.operation)) && args.dryRun !== true) return { content: `${String(args.operation)} is not available in the automated release-readiness stage: it only verifies and reports. Use dryRun=true to preview it. Shipping happens afterwards, in a chat with Hollis, after you review and merge.`, isError: true };
       }
       if (name === "ios_open_release_workspace") return openWorkspace();

@@ -3,6 +3,7 @@ import path from "node:path";
 import { repoHome } from "../team/state.js";
 import { serialize } from "../team/serial.js";
 import type { AppStoreConnectKeyRef, OperationResult, ReleasePermissions, StepId, StepRecord } from "./types.js";
+import type { SideloadResult } from "./sideload.js";
 
 export interface IosReleaseSettings {
   scheme?: string;
@@ -85,7 +86,7 @@ export async function updateIosState(repo: string, change: (state: IosReleaseSta
 }
 
 /** Persist the full result (and the exact worktree context) of one operation; keeps the 30 most recent. */
-export async function saveOperationRecord(repo: string, id: string, result: OperationResult): Promise<string> {
+export async function saveOperationRecord(repo: string, id: string, result: OperationResult | SideloadResult): Promise<string> {
   const folder = path.join(runsDir(repo), id);
   await mkdir(folder, { recursive: true });
   await writeFile(path.join(folder, "result.json"), JSON.stringify(result, null, 2) + "\n", "utf8");
