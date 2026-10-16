@@ -24,7 +24,7 @@ const ctx = (repo: IosRepo, extra: Record<string, unknown> = {}) => ({ root: rep
 
 test("the agent tool surface is typed, has no shell access, and cannot grant permissions or submit", () => {
   const tools = iosTools();
-  assert.deepEqual(IOS_TOOL_NAMES.sort(), ["ios_check_readiness", "ios_discover_project", "ios_mac_maintenance", "ios_playbook", "ios_prepare_release", "ios_recent_runs", "ios_release_audit", "ios_release_preflight", "ios_release_status", "ios_run_operation", "ios_screenshot_requirements"]);
+  assert.deepEqual(IOS_TOOL_NAMES.sort(), ["ios_check_readiness", "ios_discover_project", "ios_list_devices", "ios_mac_maintenance", "ios_playbook", "ios_prepare_release", "ios_recent_runs", "ios_release_audit", "ios_release_preflight", "ios_release_status", "ios_run_operation", "ios_screenshot_requirements", "ios_sideload_app"]);
   for (const tool of tools) {
     const properties = Object.keys((tool.parameters as { properties: object }).properties);
     assert.ok(!properties.some((name) => /command|shell|script|args|path|secret|password|key/i.test(name)), `${tool.name}: ${properties.join(",")}`);

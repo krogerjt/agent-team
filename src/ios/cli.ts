@@ -1,9 +1,12 @@
 import "dotenv/config";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { realpath } from "node:fs/promises";
 import { git } from "../coding/git.js";
 import { executeIosTool } from "./tools.js";
-import { readIosState, saveIosSettings, setIosPermission } from "./store.js";
+import { readIosState, saveIosSettings, saveOperationRecord, setIosPermission } from "./store.js";
+import { listConnectedDevices, sideloadApp, SIDELOAD_TOOLS, type SideloadTool } from "./sideload.js";
+import { readRemoteBuildHost } from "../remote/settings.js";
 
 function value(args: string[], flag: string): string {
   const index = args.indexOf(flag);
@@ -36,11 +39,40 @@ async function main(): Promise<void> {
   status [--recheck]               Release progress; --recheck resumes after you fix a blocker
   preflight                        Dry run of archive/export/upload (changes nothing)
   prepare <increment-build|set-marketing-version|generate-templates|validate-files|checklist|collect-screenshots> [--apply] [--marketing-version 1.2.0]
+  devices                          iPhones/iPads connected to the Mac (--repo optional)
+  sideload <app.ipa|App.app> [--on-mac] [--device UDID] [--tool devicectl|ios-deploy|libimobiledevice] [--launch] [--dry-run]
+                                   Install a built, signed app on the connected device (--repo optional)
   run <generate-project|build-simulator|test-simulator|build-release|install-device|archive|export|upload> [--dry-run] [--scheme S] [--test-scope unit|ui|all] [--simulator "iPhone 17 Pro Max"] [--capture-screenshots] [--validate-only]
   settings [--team ID] [--scheme S] [--device UDID] [--api-key-id-secret N --api-issuer-secret N --api-key-secret N]
   grant <signing|upload>           YOU grant a permission; agents cannot
   revoke <signing|upload>
 Submitting for App Review is never automated.`);
+    return;
+  }
+  if (command === "devices" || command === "sideload") {
+    // These work on any built app, so a repository is only used for the saved preferred device and run history.
+    const repo = args.includes("--repo") ? await repoRoot(args) : undefined;
+    if (command === "devices") {
+      const host = await readRemoteBuildHost();
+      if (!host.enabled || !host.target) throw new Error("No Mac Build Host is enabled. Open Workshop Options → Mac Build Host, save the SSH alias, test it, and enable it.");
+      const probe = await listConnectedDevices(host);
+      if (json) console.log(JSON.stringify(probe, null, 2));
+      else if (probe.error) console.log(probe.error);
+      else {
+        console.log(`Tools on the Mac: ${SIDELOAD_TOOLS.map((tool) => `${tool} ${probe.tools[tool] ? "yes" : "no"}`).join(", ")}`);
+        console.log(probe.devices.length ? probe.devices.map((device) => `${device.name}${device.os ? ` (iOS ${device.os})` : ""}  ${device.udid}  via ${device.tool}${device.ready ? "" : `  NOT READY: ${device.note}`}`).join("\n") : "No iPhone or iPad is connected to the Mac.");
+      }
+      if (probe.error) process.exitCode = 1;
+      return;
+    }
+    if (!sub) throw new Error("Pass the .ipa or .app to install: npm run ios -- sideload <path> [--on-mac] [--device UDID] [--launch]");
+    const app = args.includes("--on-mac") ? sub : path.resolve(sub);
+    const settings = repo ? (await readIosState(repo)).settings : undefined;
+    const result = await sideloadApp({ app, onMac: args.includes("--on-mac"), udid: optional(args, "--device"), tool: optional(args, "--tool") as SideloadTool | undefined, launch: args.includes("--launch"), dryRun: args.includes("--dry-run") }, { host: await readRemoteBuildHost(), preferredUdid: settings?.deviceUdid });
+    if (repo && result.status !== "dry-run") await saveOperationRecord(repo, `${new Date().toISOString().replace(/[:.]/g, "-")}-sideload-${randomUUID().slice(0, 8)}`, result).catch(() => undefined);
+    if (json) console.log(JSON.stringify(result, null, 2));
+    else console.log([result.summary, ...(result.remedy ? [`Fix: ${result.remedy}`] : []), ...(result.status === "failed" && result.output ? ["", result.output.slice(-3_000)] : []), ...(result.status === "dry-run" ? result.commands.map((line) => `  ${line}`) : [])].join("\n"));
+    if (result.status === "failed" || result.status === "blocked") process.exitCode = 1;
     return;
   }
   const repo = await repoRoot(args);

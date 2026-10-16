@@ -105,6 +105,21 @@ A build, test, archive or upload is reported as `status: "success"` only when th
 
 Every operation records the exact worktree it used (commit, dirty flag and a content hash of the uploaded files that ignores `release/` and `docs/`). An archive or export is only used if it was built from the current tree. Temporary Mac-side source copies and API-key files are removed after each operation, success or failure; only build caches and archives remain.
 
+### Sideload an app onto the connected iPhone or iPad
+
+To install an app that is already built and signed onto whichever device is plugged into the Mac Build Host:
+
+```powershell
+npm run ios -- devices                                   # what is connected, and which tool sees it
+npm run ios -- sideload C:\builds\MyApp.ipa --launch
+npm run ios -- sideload ~/Downloads/MyApp.ipa --on-mac   # the file is already on the Mac
+npm run ios -- sideload .\build\MyApp.app --device 00008110-001A2B3C4D5E6F70 --tool ios-deploy
+```
+
+A local `.ipa` or `.app` is copied to a disposable folder on the Mac, installed, and the folder is removed. The device is detected with Xcode's `devicectl` first, then `ios-deploy`, then libimobiledevice (`ideviceinstaller`), whichever is installed and sees it. With one device connected it is used; with several, pass `--device` (or save a preferred one with `npm run ios -- settings --device`). `--launch` opens the app afterwards (not available with libimobiledevice), and `--dry-run` shows the commands without contacting the Mac. `--repo` is optional; with it, the saved preferred device is used and the result appears in Hollis's recent runs. Hollis has the same thing as `ios_list_devices` and `ios_sideload_app` when you chat with him; inside a team run it is refused, like other device installs.
+
+Nothing is built or signed: the app must already be signed for that device (a development or ad-hoc profile that includes its UDID). App Store exports do not install directly; use TestFlight for those. Failures name the fix (profile doesn't include the device, Developer Mode off, device locked or not trusted, iOS too old).
+
 ### Mac Build Host setup
 
 Everything above builds on the existing **Options → Mac Build Host** panel (see "Use a Mac as a remote Xcode builder"): enable Remote Login on the Mac, add your SSH key, create the dedicated Agent Team Build Keychain and its `~/.agent-team/mac-build-host.env`, and enable the host. Then:
